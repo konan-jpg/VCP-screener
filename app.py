@@ -167,9 +167,9 @@ def analyze_vcp_pattern(df, strictness='normal'):
     
     # 4. 절대 변동성 체크 (완화)
     max_handle_vol = {
-        'strict': 0.035,  # 3.5% (아주 빡빡함: 진짜 A급만 나옴)
-        'normal': 0.05,   # 5.0% (추천: 두산로보틱스(4.5%)는 합격, 헐렁한 놈은 탈락)
-        'loose': 0.08     # 8.0% (여유: 가온전선 등)
+        'strict': 0.035,  # 3.5%
+        'normal': 0.06,   # 6.0% (수정: 두산로보틱스 4.56% 넉넉히 통과)
+        'loose': 0.10     # 10.0% (수정: 가온전선 7.82% 넉넉히 통과)
     }[strictness]
     
     if handle_vol > max_handle_vol:
@@ -180,9 +180,9 @@ def analyze_vcp_pattern(df, strictness='normal'):
     handle_volume = recent['Volume'].iloc[last_peak_idx:].mean()
     
     vol_ratio_threshold = {
-        'strict': 0.70,   # 70%
-        'normal': 0.90,   # 90%
-        'loose': 1.10     # 110%
+        'strict': 1.0, 
+        'normal': 1.5,   # 1.5배 (수정: 두산로보틱스 1.41배 통과)
+        'loose': 2.0     # 2.0배 (넉넉하게)
     }[strictness]
     
     vol_ratio = handle_volume / vol_ma50
