@@ -167,7 +167,7 @@ def analyze_vcp_pattern(df, strictness='normal'):
     
     # 4. 절대 변동성 체크 (완화)
     max_handle_vol = {
-        'strict': 0.035,  # 3.5%
+        'strict': 0.035,  # 3.5% (빡빡함)
         'normal': 0.06,   # 6.0% (수정: 두산로보틱스 4.56% 넉넉히 통과)
         'loose': 0.10     # 10.0% (수정: 가온전선 7.82% 넉넉히 통과)
     }[strictness]
@@ -182,12 +182,11 @@ def analyze_vcp_pattern(df, strictness='normal'):
     vol_ratio_threshold = {
         'strict': 1.0, 
         'normal': 1.5,   # 1.5배 (수정: 두산로보틱스 1.41배 통과)
-        'loose': 2.0     # 2.0배 (넉넉하게)
+        'loose': 2.0     # 2.0배
     }[strictness]
     
-    vol_ratio = handle_volume / vol_ma50
-    if vol_ratio > vol_ratio_threshold:
-        return None, f"거래량 과다 ({vol_ratio:.1%})"
+    if handle_volume > vol_ma50 * vol_ratio_threshold:
+        return None, "거래량 과다"
     
     # 6. Pivot 검증
     pivot = recent['High'].iloc[last_peak_idx]
