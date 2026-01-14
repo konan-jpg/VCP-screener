@@ -166,11 +166,11 @@ def analyze_vcp_pattern(df, strictness='normal'):
             return None, f"수축 미흡 ({handle_vol/recent_waves[0]:.1%})"
     
     # 4. 절대 변동성 체크 (완화)
-    max_handle_vol = {
-        'strict': 0.04,   # 4%
-        'normal': 0.06,   # 6%
-        'loose': 0.08     # 8%
-    }[strictness]
+max_handle_vol = {
+    'strict': 0.025,  # 2.5% (미너비니급 초정밀: 헐렁한 놈 절대 사절)
+    'normal': 0.045,  # 4.5% (적당히 얌전한 놈)
+    'loose': 0.07     # 7.0% (가온전선 같은 놈)
+}[strictness]
     
     if handle_vol > max_handle_vol:
         return None, f"핸들 변동성 과다 ({handle_vol:.1%})"
