@@ -113,7 +113,7 @@ def analyze_vcp_pattern(df, strictness='normal'):
     if df is None or len(df) < 100:
         return None, "데이터 부족"
 
-    recent = df.tail(120).copy()
+    recent = df.tail(300).copy()
     recent['atr'] = (recent['High'] - recent['Low']) / recent['Close']
     
     # 1. 고점 찾기
