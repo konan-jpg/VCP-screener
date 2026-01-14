@@ -179,13 +179,15 @@ def analyze_vcp_pattern(df, strictness='normal'):
     vol_ma50 = df['Volume'].rolling(50).mean().iloc[-1]
     handle_volume = recent['Volume'].iloc[last_peak_idx:].mean()
     
+    vol_ratio = handle_volume / vol_ma50
+    
     vol_ratio_threshold = {
         'strict': 1.0, 
-        'normal': 1.5,   # 1.5배 (수정: 두산로보틱스 1.41배 통과)
-        'loose': 2.0     # 2.0배
+        'normal': 1.5, 
+        'loose': 2.0
     }[strictness]
     
-    if handle_volume > vol_ma50 * vol_ratio_threshold:
+    if vol_ratio > vol_ratio_threshold:
         return None, "거래량 과다"
     
     # 6. Pivot 검증
