@@ -3,4 +3,3 @@ pandas
 numpy
 finance-datareader
 plotly
-scipy
