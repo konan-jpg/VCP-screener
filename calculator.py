@@ -1,185 +1,296 @@
 import streamlit as st
 import FinanceDataReader as fdr
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 
 # -------------------------------------------------
 # 기본 설정
 # -------------------------------------------------
-st.set_page_config(page_title="VCP Chart Target Viewer", layout="wide")
-st.title("📈 VCP Target / Stop Chart Viewer")
+st.set_page_config(page_title="VCP Auto Calculator", layout="wide")
+st.title("🎯 VCP 자동 계산기")
 
 st.markdown("""
-**종목을 입력하면 Pivot · Stop · Target이 차트에 표시됩니다**
+**종목 코드만 입력하면 Pivot · Stop · Target 자동 계산**
 
-- 계산 ❌
-- 판별 ❌
-- 시각화 ⭕
-- **KRX 접속 실패 시 백업 사용**
+- ✅ Pivot 자동 계산 (최근 고점)
+- ✅ Stop 자동 계산 (Pivot 기준 5~7%)
+- ✅ 2R, 3R 목표가 자동 표시
+- ✅ 포지션 사이징 계산
 """)
 
 # -------------------------------------------------
-# 데이터 로딩 (백업 포함)
+# 데이터 로딩
 # -------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_data(code):
-    """
-    주식 데이터 로딩 (백업 포함)
-    1. FinanceDataReader 시도
-    2. 실패 시 경고 메시지
-    """
+    """주식 데이터 로딩"""
     end = datetime.now()
-    start = end - timedelta(days=180)
+    start = end - timedelta(days=200)
     
     try:
         df = fdr.DataReader(code, start, end)
         if df is not None and len(df) > 0:
-            st.success(f"✅ {code} 데이터 로딩 성공")
             return df
-        else:
-            st.warning(f"⚠️ {code} 데이터가 비어있습니다")
-            return None
-    except Exception as e:
-        st.error(f"❌ 데이터 로딩 실패: {str(e)}")
-        st.info("💡 종목 코드를 확인하거나, KRX 서버 상태를 확인하세요")
+        return None
+    except:
         return None
 
 # -------------------------------------------------
-# 입력 UI
+# Pivot & Stop 자동 계산
+# -------------------------------------------------
+def calculate_pivot_stop(df, pivot_period=60, stop_pct=5.0):
+    """
+    Pivot & Stop 자동 계산
+    
+    Pivot: 최근 60일 최고가
+    Stop: Pivot 기준 5% 하락
+    """
+    if df is None or len(df) < pivot_period:
+        return None, None, "데이터 부족"
+    
+    # Pivot = 최근 N일 최고가
+    recent_df = df.tail(pivot_period)
+    pivot = recent_df['High'].max()
+    
+    # Pivot이 나온 날짜
+    pivot_date = recent_df[recent_df['High'] == pivot].index[-1]
+    days_ago = (df.index[-1] - pivot_date).days
+    
+    # Stop = Pivot에서 N% 하락
+    stop = pivot * (1 - stop_pct / 100)
+    
+    return pivot, stop, f"Pivot: {days_ago}일 전 고점"
+
+# -------------------------------------------------
+# 포지션 사이징 계산
+# -------------------------------------------------
+def calculate_position_sizing(account, risk_pct, pivot, stop):
+    """포지션 사이징"""
+    if pivot <= 0 or stop <= 0 or pivot <= stop:
+        return 0, 0, 0, 0
+    
+    risk_amount = account * (risk_pct / 100)
+    loss_per_share = pivot - stop
+    
+    if loss_per_share <= 0:
+        return 0, 0, 0, 0
+    
+    qty = int(risk_amount / loss_per_share)
+    total = qty * pivot
+    position_pct = (total / account) * 100
+    
+    return qty, total, position_pct, loss_per_share
+
+# -------------------------------------------------
+# UI - 입력부
 # -------------------------------------------------
 col_input, col_chart = st.columns([1, 3])
 
 with col_input:
     st.subheader("📥 입력")
-
+    
     code = st.text_input(
-        "종목 코드 또는 이름", 
-        placeholder="예: 005930 또는 삼성전자",
-        help="6자리 종목 코드를 입력하세요"
-    )
-
-    pivot = st.number_input(
-        "Pivot (진입가)", 
-        min_value=0.0, 
-        step=100.0,
-        help="차트에서 확인한 Pivot 가격"
+        "종목 코드",
+        placeholder="예: 005930",
+        help="6자리 종목 코드"
     )
     
-    stop = st.number_input(
-        "Stop (손절가)", 
-        min_value=0.0, 
-        step=100.0,
-        help="계획한 손절 가격"
-    )
-
     st.divider()
     
-    st.markdown("### 🎯 목표가 표시")
-    show_2r = st.checkbox("2R (1차 목표)", value=True)
-    show_3r = st.checkbox("3R (2차 목표)", value=True)
+    st.markdown("### ⚙️ 설정")
+    
+    pivot_period = st.slider(
+        "Pivot 기간 (일)",
+        30, 120, 60, 5,
+        help="최근 N일 중 최고가를 Pivot으로"
+    )
+    
+    stop_pct = st.slider(
+        "손절폭 (%)",
+        3.0, 10.0, 5.0, 0.5,
+        help="Pivot 대비 하락 %"
+    )
+    
+    st.divider()
+    
+    st.markdown("### 💰 자금 관리")
+    
+    account = st.number_input(
+        "총 자산 (원)",
+        value=50_000_000,
+        step=1_000_000,
+        format="%d"
+    )
+    
+    risk_pct = st.slider(
+        "계좌 리스크 (%)",
+        0.5, 2.5, 1.0, 0.1,
+        help="한 번 매매 시 전체 자산 중 리스크 비율"
+    )
+    
+    st.divider()
+    
+    st.markdown("### 🎯 목표가")
+    show_2r = st.checkbox("2R 표시", value=True)
+    show_3r = st.checkbox("3R 표시", value=True)
 
 # -------------------------------------------------
-# 차트 표시
+# 차트 & 계산 결과
 # -------------------------------------------------
 with col_chart:
     if not code:
         st.info("👈 종목 코드를 입력하세요")
         
-        with st.expander("💡 사용 방법"):
+        with st.expander("💡 사용법"):
             st.markdown("""
-            ### 사용법
+            ### 자동 계산 방식
             
-            1. **종목 코드 입력**
-               - 6자리 숫자 (예: 005930)
-               - 또는 종목명 (예: 삼성전자)
+            **Pivot 계산:**
+            - 최근 60일(기본) 중 **최고가**
+            - 슬라이더로 기간 조정 가능
+            - 이것이 진입 목표가
             
-            2. **Pivot 입력**
-               - 스캐너에서 찾은 종목의 최근 고점
-               - 차트에서 육안으로 확인한 저항선
+            **Stop 계산:**
+            - Pivot에서 5%(기본) 하락
+            - 슬라이더로 손절폭 조정
+            - 이 가격 이탈 시 무조건 청산
             
-            3. **Stop 입력**
-               - Pivot 기준 5~7% 하락한 가격
-               - 예: Pivot 100,000원 → Stop 95,000원
+            **포지션 사이징:**
+            - 계좌 리스크: 1% (기본)
+            - 한 번 손절 시 총 자산의 1% 손실
+            - 이에 맞는 수량 자동 계산
             
-            4. **R 배수 계산**
-               - 1R = Pivot - Stop
-               - 2R = Pivot + (1R × 2)
-               - 3R = Pivot + (1R × 3)
-            
-            ### 백업 CSV
-            
-            KRX 서버 접속이 안 될 경우:
-            - 백업 CSV 준비 필요 없음
-            - 종목 코드만 정확하면 작동
-            - 데이터는 FinanceDataReader가 처리
+            **R 배수:**
+            - 1R = Pivot - Stop
+            - 2R = Pivot + (1R × 2)
+            - 3R = Pivot + (1R × 3)
             """)
     else:
         df = load_data(code)
-
+        
         if df is None:
-            st.error("❌ 종목 데이터를 불러올 수 없습니다")
-            st.markdown("""
-            **문제 해결:**
-            1. 종목 코드 확인 (6자리 숫자)
-            2. KRX 서버 상태 확인
-            3. 잠시 후 다시 시도
-            """)
+            st.error("❌ 데이터 로딩 실패")
+            st.info("종목 코드를 확인하세요")
         else:
-            fig = go.Figure()
-
-            # 캔들
-            fig.add_trace(go.Candlestick(
-                x=df.index,
-                open=df['Open'],
-                high=df['High'],
-                low=df['Low'],
-                close=df['Close'],
-                name="Price"
-            ))
+            # Pivot & Stop 계산
+            pivot, stop, info_msg = calculate_pivot_stop(df, pivot_period, stop_pct)
             
-            # 50일 이평선 (참고)
-            ma50 = df['Close'].rolling(50).mean()
-            fig.add_trace(go.Scatter(
-                x=df.index,
-                y=ma50,
-                line=dict(color='blue', width=1, dash='dot'),
-                name='50MA'
-            ))
-
-            # Pivot / Stop 검증 및 표시
-            if pivot > 0 and stop > 0 and pivot > stop:
-                r = pivot - stop
-                target_2r = pivot + 2 * r
-                target_3r = pivot + 3 * r
-
+            if pivot is None:
+                st.error("계산 실패")
+            else:
+                current_price = df['Close'].iloc[-1]
+                
+                # 주요 지표 표시
+                col1, col2, col3, col4 = st.columns(4)
+                
+                col1.metric(
+                    "현재가",
+                    f"{current_price:,.0f}원"
+                )
+                
+                col2.metric(
+                    "🎯 Pivot (진입가)",
+                    f"{pivot:,.0f}원",
+                    f"+{((pivot - current_price) / current_price * 100):.1f}%"
+                )
+                
+                col3.metric(
+                    "🛑 Stop (손절가)",
+                    f"{stop:,.0f}원",
+                    f"-{stop_pct}%"
+                )
+                
+                r_value = pivot - stop
+                col4.metric(
+                    "1R",
+                    f"{r_value:,.0f}원"
+                )
+                
+                st.caption(info_msg)
+                
+                # 포지션 사이징
+                qty, total, pos_pct, loss_per_share = calculate_position_sizing(
+                    account, risk_pct, pivot, stop
+                )
+                
+                st.divider()
+                
+                st.markdown("### 💼 포지션 사이징")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                col1.metric(
+                    "매수 수량",
+                    f"{qty:,}주",
+                    help=f"주당 손실: {loss_per_share:,.0f}원"
+                )
+                
+                col2.metric(
+                    "투입 금액",
+                    f"{total:,.0f}원",
+                    f"비중 {pos_pct:.1f}%"
+                )
+                
+                max_loss = qty * loss_per_share
+                col3.metric(
+                    "최대 손실",
+                    f"{max_loss:,.0f}원",
+                    f"계좌의 {risk_pct}%"
+                )
+                
+                if pos_pct > 20:
+                    st.error(f"⚠️ 비중 {pos_pct:.1f}%는 과도합니다!")
+                elif pos_pct > 15:
+                    st.warning(f"⚠️ 비중 {pos_pct:.1f}%는 다소 높습니다")
+                
+                # 차트
+                st.divider()
+                st.markdown("### 📈 차트")
+                
+                fig = go.Figure()
+                
+                # 캔들
+                df_chart = df.tail(120)
+                fig.add_trace(go.Candlestick(
+                    x=df_chart.index,
+                    open=df_chart['Open'],
+                    high=df_chart['High'],
+                    low=df_chart['Low'],
+                    close=df_chart['Close'],
+                    name="Price"
+                ))
+                
+                # 50일선
+                ma50 = df_chart['Close'].rolling(50).mean()
+                fig.add_trace(go.Scatter(
+                    x=df_chart.index,
+                    y=ma50,
+                    line=dict(color='blue', width=1, dash='dot'),
+                    name='50MA'
+                ))
+                
                 # Pivot
                 fig.add_hline(
                     y=pivot,
                     line=dict(color="blue", width=2),
-                    annotation_text=f"Pivot: {pivot:,.0f}",
+                    annotation_text=f"🎯 Pivot: {pivot:,.0f}",
                     annotation_position="right"
                 )
-
+                
                 # Stop
                 fig.add_hline(
                     y=stop,
                     line=dict(color="red", width=2),
-                    annotation_text=f"Stop: {stop:,.0f}",
+                    annotation_text=f"🛑 Stop: {stop:,.0f}",
                     annotation_position="right"
                 )
-
-                # 1R 계산 표시
-                current_price = df['Close'].iloc[-1]
                 
-                st.info(f"""
-                **R 계산:**
-                - 1R = {r:,.0f}원
-                - 현재가: {current_price:,.0f}원
-                - Pivot까지: {((pivot - current_price) / current_price * 100):+.1f}%
-                """)
-
-                # Targets
+                # Target 계산
+                target_2r = pivot + 2 * r_value
+                target_3r = pivot + 3 * r_value
+                
                 if show_2r:
                     fig.add_hline(
                         y=target_2r,
@@ -187,7 +298,7 @@ with col_chart:
                         annotation_text=f"2R: {target_2r:,.0f}",
                         annotation_position="right"
                     )
-
+                
                 if show_3r:
                     fig.add_hline(
                         y=target_3r,
@@ -195,61 +306,81 @@ with col_chart:
                         annotation_text=f"3R: {target_3r:,.0f}",
                         annotation_position="right"
                     )
-                    
+                
+                fig.update_layout(
+                    title=f"{code} - 자동 계산 결과",
+                    height=600,
+                    xaxis_rangeslider_visible=False,
+                    hovermode="x unified",
+                    showlegend=True
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
                 # 수익률 계산
                 profit_2r = ((target_2r - pivot) / pivot) * 100
                 profit_3r = ((target_3r - pivot) / pivot) * 100
                 loss = ((stop - pivot) / pivot) * 100
+                rr_ratio = profit_2r / abs(loss)
                 
-                st.success(f"""
-                **예상 수익/손실:**
-                - Stop 도달 시: {loss:.1f}%
-                - 2R 도달 시: +{profit_2r:.1f}%
-                - 3R 도달 시: +{profit_3r:.1f}%
-                - 위험:보상 비율 = 1:{profit_2r/abs(loss):.1f} (2R 기준)
+                st.info(f"""
+                **📊 예상 시나리오**
+                
+                **손실 시:**
+                - Stop 도달: {loss:.1f}% 손실
+                - 금액: -{max_loss:,.0f}원
+                
+                **수익 시:**
+                - 2R 도달: +{profit_2r:.1f}% (+{qty * (target_2r - pivot):,.0f}원)
+                - 3R 도달: +{profit_3r:.1f}% (+{qty * (target_3r - pivot):,.0f}원)
+                
+                **위험:보상 비율:** 1:{rr_ratio:.1f}
                 """)
-            else:
-                st.warning("⚠️ Pivot과 Stop을 올바르게 입력하세요 (Pivot > Stop)")
-
-            fig.update_layout(
-                title=f"{code} - Pivot / Stop / Target 차트",
-                height=700,
-                xaxis_rangeslider_visible=False,
-                hovermode="x unified",
-                showlegend=True
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # 추가 정보
-            with st.expander("📊 차트 해석 가이드"):
-                st.markdown("""
-                ### 진입 시점
-                - 현재가가 Pivot을 **강한 거래량**과 함께 돌파
-                - 돌파 거래량: 평균 대비 40~50% 이상
-                - 당일 또는 익일 재진입 시점에서 매수
                 
-                ### 손절 규칙
-                - Stop 가격 이탈 시 **즉시 청산**
-                - 예외 없음
-                - 감정 배제
-                
-                ### 익절 전략
-                - 2R 도달: 30% 익절
-                - 3R 도달: 추가 30% 익절
-                - 나머지: 50일선 -3% 이탈 시 전량 청산
-                
-                ### 주의사항
-                - 이 도구는 시각화만 제공
-                - 최종 판단은 본인의 책임
-                - 뉴스/공시 확인 필수
-                """)
+                # 상세 가이드
+                with st.expander("📋 매매 실행 가이드"):
+                    st.markdown(f"""
+                    ### 진입 조건
+                    
+                    1. **가격**: 현재가({current_price:,.0f}원) → Pivot({pivot:,.0f}원) 돌파
+                    2. **거래량**: 평균 대비 40~50% 증가 확인
+                    3. **타이밍**: 
+                       - 장중 돌파: 당일 종가 매수
+                       - 장 마감 후 돌파: 익일 재진입 확인
+                    
+                    ### 손절 규칙
+                    
+                    - **Stop 가격**: {stop:,.0f}원
+                    - **손절폭**: {stop_pct}%
+                    - **규칙**: 이 가격 이탈 시 **즉시** 전량 청산
+                    - **예외**: 없음
+                    
+                    ### 익절 전략
+                    
+                    **1차 익절 (2R: {target_2r:,.0f}원)**
+                    - 수량의 30% 익절
+                    - 수익 확정: +{profit_2r:.1f}%
+                    
+                    **2차 익절 (3R: {target_3r:,.0f}원)**
+                    - 수량의 추가 30% 익절
+                    - 수익 확정: +{profit_3r:.1f}%
+                    
+                    **나머지 40%:**
+                    - 50일선 -3% 이탈 시 전량 청산
+                    - 또는 추세 꺾임 시 판단
+                    
+                    ### 주의사항
+                    
+                    - 이 계산은 **참고용**입니다
+                    - 최종 판단은 본인의 책임
+                    - 뉴스/공시 확인 필수
+                    - 감정 배제, 기계적 실행
+                    """)
 
 # -------------------------------------------------
 # 하단
 # -------------------------------------------------
 st.divider()
 st.caption("""
-**이 화면에서 하는 일은 하나뿐이다.**  
-선을 보고, 판단은 사람의 몫으로 남긴다.
+**자동 계산 + 시각화 = 판단은 사람의 몫**
 """)
