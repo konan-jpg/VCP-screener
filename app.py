@@ -5,21 +5,22 @@ import FinanceDataReader as fdr
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from scipy.signal import find_peaks
 
 # -----------------------------------------------------------
 # 1. 기본 설정
 # -----------------------------------------------------------
-st.set_page_config(page_title="VCP Master Pro", layout="wide")
+st.set_page_config(page_title="VCP Tightness Scanner v3", layout="wide")
 
 st.markdown("""
 <style>
     .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 5px; }
+    .bonus-box { background-color: #d4edda; padding: 10px; border-radius: 5px; border-left: 5px solid #28a745; }
 </style>
 """, unsafe_allow_html=True)
 
 @st.cache_data(ttl=3600)
 def get_krx_stocks():
+    """시총 2,000억 이상 종목만"""
     try:
         kospi = fdr.StockListing('KOSPI')
         kosdaq = fdr.StockListing('KOSDAQ')
@@ -28,227 +29,168 @@ def get_krx_stocks():
         stocks = stocks[~stocks['Name'].str.contains('우')]
         stocks = stocks[~stocks['Name'].str.contains('스팩')]
         
+        # ✅ 시총 2,000억 이상 (패턴 신뢰성 하한선)
         if 'Marcap' in stocks.columns:
-            stocks = stocks[stocks['Marcap'] >= 50_000_000_000]
+            stocks = stocks[stocks['Marcap'] >= 200_000_000_000]
             stocks = stocks.sort_values('Marcap', ascending=False)
+            stocks['Marcap_billion'] = stocks['Marcap'] / 100_000_000
         
-        stocks['Marcap_billion'] = stocks['Marcap'] / 100_000_000
         return stocks[['Code', 'Name', 'Market', 'Marcap_billion']]
     except Exception as e:
         st.error(f"종목 로딩 실패: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
-def get_stock_data(code, days=600):
+def get_stock_data(code, days=200):
+    """주식 데이터"""
     try:
         end = datetime.now()
         start = end - timedelta(days=days)
         df = fdr.DataReader(code, start, end)
-        return df if len(df) > 0 else None
+        return df if df is not None and len(df) > 0 else None
     except:
         return None
 
 # -----------------------------------------------------------
-# 2. 기술적 지표
+# 2. VCP Tightness Scanner v3 (최종)
 # -----------------------------------------------------------
-def ma(df, n):
-    return df['Close'].rolling(n).mean()
-
-def check_stage2_trend(df, min_price=10000):
-    """Stage 2 확인 + 최소가격 필터"""
-    if len(df) < 220:
-        return False, "데이터 부족", None
-    
-    current_close = df['Close'].iloc[-1]
-    
-    # 최소 가격 체크
-    if current_close < min_price:
-        return False, f"가격 {current_close:,.0f}원 (최소 {min_price:,}원)", None
-
-    ma_vals = {
-        50: ma(df, 50),
-        150: ma(df, 150),
-        200: ma(df, 200)
-    }
-    
-    m50 = ma_vals[50].iloc[-1]
-    m150 = ma_vals[150].iloc[-1]
-    m200 = ma_vals[200].iloc[-1]
-
-    # 정배열 체크
-    if not (current_close > m50 > m150 > m200):
-        return False, "정배열 불량", None
-    
-    # 200일선 상승 추세
-    m200_1m = ma_vals[200].iloc[-22]
-    if m200 <= m200_1m:
-        return False, "200일선 하락", None
-
-    # 바닥 대비 상승
-    low_52w = df['Low'].tail(252).min()
-    rise = ((current_close - low_52w) / low_52w) * 100
-    if rise < 30.0:
-        return False, f"바닥 대비 {rise:.1f}%", None
-
-    # 고점 대비 위치
-    high_52w = df['High'].tail(252).max()
-    if current_close < high_52w * 0.70:
-        return False, "52주 고점 대비 낮음", None
-
-    return True, "Stage 2 OK", ma_vals
-
-# -----------------------------------------------------------
-# 3. VCP 패턴 분석 (완화된 버전)
-# -----------------------------------------------------------
-def find_peaks_simple(series, distance=8):
-    """고점 찾기"""
-    peaks, _ = find_peaks(series.values, distance=distance)
-    return peaks
-
-def analyze_vcp_pattern(df, strictness='normal'):
+def vcp_tightness_scanner(df, short_period=10, long_period=60, atr_period=20):
     """
-    VCP 패턴 분석
-    strictness: 'strict' (엄격), 'normal' (보통), 'loose' (완화)
+    VCP Tightness Scanner v3 - 완전판
+    
+    핵심 개선:
+    1. 시총 2,000억 이상 (하드 필터)
+    2. 현재가 10,000원 이상 (하드 필터)
+    3. 저점 유지력 보너스
+    4. 조용한 양봉 연속성 (최대 3일)
     """
-    if df is None or len(df) < 100:
-        return None, "데이터 부족"
-
-    recent = df.tail(300).copy()
-    recent['atr'] = (recent['High'] - recent['Low']) / recent['Close']
+    if df is None or len(df) < long_period + atr_period:
+        return None
     
-    # 1. 고점 찾기
-    peaks_idx = find_peaks_simple(recent['High'], distance=8)
+    close = df['Close']
+    open_ = df['Open']
+    high = df['High']
+    low = df['Low']
+    volume = df['Volume']
     
-    if len(peaks_idx) < 2:
-        return None, "파동 부족 (최소 2개 고점)"
+    # ✅ 현재가 10,000원 이상 (통계적 왜곡 제거)
+    current_price = close.iloc[-1]
+    if current_price < 10_000:
+        return None
     
-    # 2. 각 파동별 변동성 계산
-    waves = []
-    for i in range(len(peaks_idx) - 1):
-        start = peaks_idx[i]
-        end = peaks_idx[i + 1]
-        wave_vol = recent['atr'].iloc[start:end].mean()
-        waves.append(wave_vol)
+    # -----------------------
+    # 1. Price Tightness
+    # -----------------------
+    std_price_short = close.tail(short_period).std()
+    std_price_long = close.tail(long_period).std()
     
-    # 마지막 파동 (핸들)
-    last_peak_idx = peaks_idx[-1]
-    handle_vol = recent['atr'].iloc[last_peak_idx:].mean()
-    waves.append(handle_vol)
+    if std_price_long == 0 or pd.isna(std_price_long):
+        return None
     
-    # 최근 3개 파동만 사용
-    recent_waves = waves[-3:] if len(waves) >= 3 else waves
+    price_tightness = std_price_short / std_price_long
     
-    if len(recent_waves) < 2:
-        return None, "분석 가능 파동 부족"
+    # -----------------------
+    # 2. Volume Dry-up
+    # -----------------------
+    std_vol_short = volume.tail(short_period).std()
+    std_vol_long = volume.tail(long_period).std()
     
-    # 3. 수축 패턴 검증 (완화 버전)
-    # 엄격: 모든 파동이 순차 감소
-    # 보통: 전체적으로 감소 추세 + 마지막이 가장 작음
-    # 완화: 마지막이 첫 파동의 60% 이하면 OK
+    if std_vol_long == 0 or pd.isna(std_vol_long):
+        return None
     
-    if strictness == 'strict':
-        # 모든 파동이 이전보다 작아야 함
-        for i in range(len(recent_waves) - 1):
-            if recent_waves[i] <= recent_waves[i + 1]:
-                return None, f"파동 {i+1}→{i+2} 수축 실패"
+    volume_dryup = std_vol_short / std_vol_long
     
-    elif strictness == 'normal':
-        # 마지막이 가장 작아야 하고, 첫 파동의 60% 이하
-        if handle_vol >= min(recent_waves[:-1]):
-            return None, "마지막 파동이 가장 작지 않음"
+    # -----------------------
+    # 3. Range Contraction
+    # -----------------------
+    range_pct = (high - low) / close
+    range_short = range_pct.tail(short_period).mean()
+    range_long = range_pct.tail(long_period).mean()
+    
+    if range_long == 0 or pd.isna(range_long):
+        return None
+    
+    range_ratio = range_short / range_long
+    
+    # -----------------------
+    # 4. ATR 계산
+    # -----------------------
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = abs(high - prev_close)
+    tr3 = abs(low - prev_close)
+    
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(atr_period).mean().iloc[-1]
+    
+    if pd.isna(atr) or atr == 0:
+        return None
+    
+    # -----------------------
+    # 5. 조용한 양봉 연속성 (최대 3일)
+    # -----------------------
+    quiet_days = 0
+    for i in range(1, 4):  # 최근 3일
+        if len(close) < i:
+            break
         
-        if handle_vol > recent_waves[0] * 0.60:
-            return None, f"수축 비율 부족 ({handle_vol/recent_waves[0]:.1%})"
+        day_close = close.iloc[-i]
+        day_open = open_.iloc[-i]
+        body = abs(day_close - day_open)
+        
+        # 양봉 + 몸통이 ATR의 40% 이하
+        if day_close > day_open and body <= atr * 0.40:
+            quiet_days += 1
     
-    else:  # loose
-        # 마지막이 첫 파동의 70% 이하면 OK
-        if handle_vol > recent_waves[0] * 0.70:
-            return None, f"수축 미흡 ({handle_vol/recent_waves[0]:.1%})"
+    # 누적 보너스 (1일당 5%, 최대 15%)
+    quiet_bonus = 1.0 - min(quiet_days * 0.05, 0.15)
     
-    # 4. 절대 변동성 체크 (완화)
-    max_handle_vol = {
-        'strict': 0.035,  # 3.5% (빡빡함)
-        'normal': 0.06,   # 6.0% (수정: 두산로보틱스 4.56% 넉넉히 통과)
-        'loose': 0.10     # 10.0% (수정: 가온전선 7.82% 넉넉히 통과)
-    }[strictness]
+    # -----------------------
+    # 6. 저점 유지력 보너스
+    # -----------------------
+    recent_low = low.tail(short_period).min()
+    long_low = low.tail(long_period).min()
     
-    if handle_vol > max_handle_vol:
-        return None, f"핸들 변동성 큼 ({handle_vol:.1%})"
+    # 최근 저점이 장기 저점의 101% 이상 유지 시 보너스
+    low_hold = recent_low >= long_low * 1.01
+    low_hold_bonus = 0.90 if low_hold else 1.0
     
-    # 5. 거래량 분석 (완화)
-    vol_ma50 = df['Volume'].rolling(50).mean().iloc[-1]
-    handle_volume = recent['Volume'].iloc[last_peak_idx:].mean()
+    # -----------------------
+    # 7. 기본 점수 계산
+    # -----------------------
+    base_score = (
+        price_tightness * 0.50 +
+        volume_dryup * 0.30 +
+        range_ratio * 0.20
+    )
     
-    vol_ratio = handle_volume / vol_ma50
-    
-    vol_ratio_threshold = {
-        'strict': 1.0, 
-        'normal': 1.5, 
-        'loose': 2.0
-    }[strictness]
-    
-    if vol_ratio > vol_ratio_threshold:
-        return None, "거래량 과다"
-    
-    # 6. Pivot 검증
-    pivot = recent['High'].iloc[last_peak_idx]
-    current_price = df['Close'].iloc[-1]
-    
-    days_since_pivot = len(recent) - last_peak_idx - 1
-    if days_since_pivot > 35:
-        return None, f"Pivot 후 {days_since_pivot}일 경과"
-    
-    pivot_dist_pct = ((pivot - current_price) / current_price) * 100
-    
-    if pivot_dist_pct < -3.0:
-        return None, "이미 돌파 (진입 늦음)"
-    
-    max_pivot_dist = {
-        'strict': 8.0,
-        'normal': 12.0,
-        'loose': 15.0
-    }[strictness]
-    
-    if pivot_dist_pct > max_pivot_dist:
-        return None, f"Pivot 거리 {pivot_dist_pct:.1f}%"
-    
-    # 7. 베이스 기간
-    base_start = peaks_idx[0] if len(peaks_idx) > 0 else 0
-    base_days = len(recent) - base_start
-    
-    if base_days < 15:
-        return None, "베이스 너무 짧음"
-    if base_days > 300:
-        return None, "베이스 너무 김"
+    # -----------------------
+    # 8. 최종 점수 (보너스 적용)
+    # -----------------------
+    final_score = base_score * quiet_bonus * low_hold_bonus
     
     return {
-        "pivot": pivot,
-        "handle_vol": handle_vol,
-        "contraction_ratio": handle_vol / recent_waves[0],
-        "volume_ratio": vol_ratio,
-        "wave_count": len(peaks_idx),
-        "base_days": base_days,
-        "pivot_distance": pivot_dist_pct,
-        "waves": recent_waves
-    }, "VCP 확인"
+        "score": final_score,
+        "base_score": base_score,
+        "price_tightness": price_tightness,
+        "volume_dryup": volume_dryup,
+        "range_ratio": range_ratio,
+        "quiet_days": quiet_days,
+        "quiet_bonus": quiet_bonus,
+        "low_hold": low_hold,
+        "low_hold_bonus": low_hold_bonus,
+        "atr": atr,
+        "current_price": current_price,
+        "recent_low": recent_low,
+        "long_low": long_low
+    }
 
 # -----------------------------------------------------------
-# 4. 자금 관리
+# 3. 차트
 # -----------------------------------------------------------
-def calc_position(account, risk_pct, entry, stop_pct):
-    risk_amt = account * (risk_pct / 100)
-    stop = entry * (1 - stop_pct / 100)
-    loss = entry - stop
-    if loss <= 0:
-        return stop, 0, 0, 0
-    qty = int(risk_amt / loss)
-    return stop, qty, qty * entry, (qty * entry / account) * 100
-
-# -----------------------------------------------------------
-# 5. 차트
-# -----------------------------------------------------------
-def plot_chart(df, name, code, pivot, stop, vcp_info):
-    df_chart = df.tail(150)
+def plot_chart(df, name, code, result):
+    """차트 시각화"""
+    df_chart = df.tail(120)
     
     fig = make_subplots(
         rows=2, cols=1,
@@ -257,6 +199,7 @@ def plot_chart(df, name, code, pivot, stop, vcp_info):
         vertical_spacing=0.03
     )
     
+    # 캔들
     fig.add_trace(go.Candlestick(
         x=df_chart.index,
         open=df_chart['Open'],
@@ -266,26 +209,26 @@ def plot_chart(df, name, code, pivot, stop, vcp_info):
         name='Price'
     ), row=1, col=1)
     
-    for period, color in [(50, 'blue'), (200, 'purple')]:
-        fig.add_trace(go.Scatter(
-            x=df_chart.index,
-            y=ma(df_chart, period),
-            line=dict(color=color),
-            name=f'{period}MA'
-        ), row=1, col=1)
+    # 50일선 (참고용)
+    ma50 = df_chart['Close'].rolling(50).mean()
+    fig.add_trace(go.Scatter(
+        x=df_chart.index,
+        y=ma50,
+        line=dict(color='blue', width=1, dash='dot'),
+        name='50MA (참고)'
+    ), row=1, col=1)
     
-    fig.add_hline(y=pivot, line_dash='dash', line_color='green',
-                  annotation_text=f'Pivot: {pivot:,.0f}', row=1, col=1)
-    fig.add_hline(y=stop, line_dash='dot', line_color='red',
-                  annotation_text=f'Stop: {stop:,.0f}', row=1, col=1)
-    
+    # 거래량
     colors = ['red' if r.Open > r.Close else 'green' for r in df_chart.itertuples()]
-    fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['Volume'],
-                         marker_color=colors), row=2, col=1)
+    fig.add_trace(go.Bar(
+        x=df_chart.index,
+        y=df_chart['Volume'],
+        marker_color=colors
+    ), row=2, col=1)
     
     title = f"{name} ({code})"
-    if vcp_info:
-        title += f" | 수축: {vcp_info['contraction_ratio']:.1%} | 파동: {vcp_info['wave_count']}"
+    if result:
+        title += f" | 점수: {result['score']:.3f} | 조용한양봉: {result['quiet_days']}일"
     
     fig.update_layout(
         title=title,
@@ -298,184 +241,247 @@ def plot_chart(df, name, code, pivot, stop, vcp_info):
     return fig
 
 # -----------------------------------------------------------
-# 6. UI
+# 4. UI
 # -----------------------------------------------------------
-st.title("🦅 VCP Master Pro")
-st.markdown("**미너비니 VCP 전략 | 우량주 중심 스크리너**")
+st.title("🔍 VCP Tightness Scanner v3 (최종)")
+st.markdown("""
+**완성된 VCP 스캐너 - 4가지 핵심 개선**
+
+✅ **하드 필터**:
+- 시총 2,000억 이상 (패턴 신뢰성)
+- 현재가 10,000원 이상 (통계적 의미)
+
+✅ **보너스 시스템**:
+- 저점 유지력: 10% 감소
+- 조용한 양봉 연속: 최대 15% 감소
+
+✅ **철학**:
+- VCP 판별 ❌ → 랭킹 ⭕
+- 절대 기준 ❌ → 상대 평가 ⭕
+""")
 
 with st.sidebar:
     st.header("⚙️ 설정")
     
-    st.markdown("### 💰 자금 관리")
-    account = st.number_input("총 자산 (원)", 10_000_000, 10_000_000_000, 50_000_000, 1_000_000)
-    risk_pct = st.slider("리스크 (%)", 0.5, 2.5, 1.0, 0.1)
-    stop_pct = st.slider("손절폭 (%)", 3.0, 8.0, 5.0, 0.5)
-    
-    st.divider()
-    
-    st.markdown("### 🔍 종목 필터")
-    min_price = st.number_input("최소 주가 (원)", 5_000, 100_000, 10_000, 1_000)
-    min_marcap = st.number_input("최소 시총 (억)", 100, 100_000, 2_000, 100)
-    
-    st.divider()
-    
-    st.markdown("### 🎯 VCP 엄격도")
-    strictness = st.select_slider(
-        "분석 기준",
-        options=['strict', 'normal', 'loose'],
-        value='normal',
-        help="strict: 엄격 | normal: 보통 | loose: 완화"
-    )
-    
-    strictness_desc = {
-        'strict': "엄격 - 모든 파동 순차 감소 필수",
-        'normal': "보통 - 전체적 감소 추세 + 마지막 최소",
-        'loose': "완화 - 마지막이 첫 파동의 70% 이하"
-    }
-    st.caption(strictness_desc[strictness])
-    
-    st.divider()
-    
-    st.markdown("### 📊 스캔 설정")
+    st.markdown("### 📊 스캔 대상")
     scan_count = st.selectbox(
-        "스캔 종목 수",
+        "시총 상위 N개",
         [100, 300, 500, 1000],
         index=1
     )
     
-    if st.button("🚀 VCP 스캔 시작", type="primary", use_container_width=True):
+    st.caption("※ 이미 시총 2,000억 이상만 포함됨")
+    
+    st.divider()
+    
+    st.markdown("### 🔬 파라미터")
+    short_period = st.slider("단기 (일)", 5, 20, 10, 1)
+    long_period = st.slider("장기 (일)", 40, 120, 60, 5)
+    atr_period = st.slider("ATR 기간", 10, 30, 20, 5)
+    
+    st.divider()
+    
+    st.markdown("### 🎯 결과")
+    top_n = st.slider("상위 표시", 10, 100, 30, 5)
+    
+    st.divider()
+    
+    if st.button("🚀 스캔 시작", type="primary", use_container_width=True):
         st.session_state['run'] = True
-        st.session_state['candidates'] = []
+        st.session_state['results'] = []
 
-if 'candidates' not in st.session_state:
-    st.session_state['candidates'] = []
+if 'results' not in st.session_state:
+    st.session_state['results'] = []
 
 # -----------------------------------------------------------
-# 7. 스캔 실행
+# 5. 스캔 실행
 # -----------------------------------------------------------
 if st.session_state.get('run'):
-    all_stocks = get_krx_stocks()
+    stocks = get_krx_stocks()
     
-    if all_stocks.empty:
+    if stocks.empty:
         st.error("종목 로딩 실패")
         st.session_state['run'] = False
     else:
-        stocks_to_scan = all_stocks.head(scan_count)
+        stocks_to_scan = stocks.head(scan_count)
         
-        st.info(f"📊 시총 상위 {len(stocks_to_scan)}개 종목 분석 시작...")
+        st.info(f"📊 시총 2,000억+ 상위 {len(stocks_to_scan)}개 스캔 중...")
         
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        fail_stats = {}
-        filtered_count = 0
-        stage2_count = 0
-        
         for idx, (_, row) in enumerate(stocks_to_scan.iterrows()):
             progress = (idx + 1) / len(stocks_to_scan)
             progress_bar.progress(progress)
-            status_text.text(f"분석 중... {idx+1}/{len(stocks_to_scan)} - {row['Name']}")
-            
-            # 시총 필터
-            if row['Marcap_billion'] < min_marcap:
-                continue
+            status_text.text(f"{idx+1}/{len(stocks_to_scan)} - {row['Name']}")
             
             df = get_stock_data(row['Code'])
             if df is None:
                 continue
             
-            filtered_count += 1
+            result = vcp_tightness_scanner(df, short_period, long_period, atr_period)
             
-            # Stage 2 체크 (최소 가격 포함)
-            is_stage2, msg, _ = check_stage2_trend(df, min_price)
-            if not is_stage2:
-                fail_stats[msg] = fail_stats.get(msg, 0) + 1
-                continue
-            
-            stage2_count += 1
-            
-            # VCP 분석
-            vcp, vcp_msg = analyze_vcp_pattern(df, strictness)
-            if vcp is None:
-                fail_stats[vcp_msg] = fail_stats.get(vcp_msg, 0) + 1
-                continue
-            
-            results.append({
-                'Code': row['Code'],
-                'Name': row['Name'],
-                'Market': row['Market'],
-                'Marcap': row['Marcap_billion'],
-                'Close': df['Close'].iloc[-1],
-                'Pivot': vcp['pivot'],
-                'VCP': vcp,
-                'df': df
-            })
-        
-        st.session_state['candidates'] = results
-        st.session_state['run'] = False
+            if result is not None:
+                results.append({
+                    'Code': row['Code'],
+                    'Name': row['Name'],
+                    'Market': row['Market'],
+                    'Marcap': row['Marcap_billion'],
+                    'df': df,
+                    **result
+                })
         
         progress_bar.empty()
         status_text.empty()
         
-        # 통계
-        with st.expander("📊 스캔 결과", expanded=True):
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("시총 필터 통과", filtered_count)
-            col2.metric("Stage 2", stage2_count)
-            col3.metric("✅ VCP", len(results))
-            col4.metric("발견율", f"{len(results)/filtered_count*100:.1f}%" if filtered_count > 0 else "0%")
+        if len(results) == 0:
+            st.warning("조건에 맞는 종목 없음")
+            st.session_state['run'] = False
+        else:
+            ranking = pd.DataFrame(results).sort_values('score').head(top_n)
+            st.session_state['results'] = ranking.to_dict('records')
+            st.session_state['run'] = False
             
-            if fail_stats:
-                st.markdown("**주요 탈락 사유**")
-                sorted_fails = sorted(fail_stats.items(), key=lambda x: x[1], reverse=True)[:7]
-                for reason, count in sorted_fails:
-                    st.caption(f"• {reason}: {count}건")
+            st.success(f"✅ 완료! {len(results)}개 중 상위 {len(ranking)}개")
 
 # -----------------------------------------------------------
-# 8. 결과 표시
+# 6. 결과 표시
 # -----------------------------------------------------------
-candidates = st.session_state['candidates']
+results = st.session_state['results']
 
-if not candidates:
-    st.info("👈 왼쪽에서 설정 후 스캔 시작")
-else:
-    st.success(f"✅ **{len(candidates)}개** VCP 후보!")
+if not results:
+    st.info("👈 설정 후 스캔 시작")
     
-    with st.expander("📋 전체 리스트"):
+    with st.expander("💡 v3 개선 사항"):
+        st.markdown("""
+        ### 왜 이 4가지가 필수인가?
+        
+        #### 1. 시총 2,000억 이상
+        - 소형주: 세력 1~2명으로 패턴 왜곡
+        - 중대형주: 기관/외국인 자금 = 진짜 패턴
+        
+        #### 2. 현재가 10,000원 이상
+        - 저가주: 호가 단위 영향 큼 → 통계 왜곡
+        - 10,000원+: 통계적 의미 있음
+        
+        #### 3. 저점 유지력 보너스 (10%)
+        - 문제: 죽은 종목도 조용함
+        - 해결: 저점 지키면서 조용한지 확인
+        - VCP = 조정 (하락 아님)
+        
+        #### 4. 조용한 양봉 연속성 (최대 15%)
+        - 1일: 우연일 수 있음
+        - 2~3일 연속: 신뢰도 급상승
+        - VCP 핸들 = 조용한 양봉 반복
+        
+        ### 점수 계산:
+        ```
+        기본 = (가격조임×0.5 + 거래량×0.3 + 레인지×0.2)
+        최종 = 기본 × 조용한양봉보너스 × 저점유지보너스
+        
+        예시:
+        기본 0.50
+        → 조용한 양봉 3일 (×0.85)
+        → 저점 유지 (×0.90)
+        = 0.50 × 0.85 × 0.90 = 0.38
+        ```
+        """)
+else:
+    st.success(f"🎯 가장 조여진 상위 {len(results)}개")
+    
+    # 요약 테이블
+    with st.expander("📋 전체 랭킹", expanded=True):
         summary = pd.DataFrame([{
-            '종목': c['Name'],
-            '코드': c['Code'],
-            '시총(억)': f"{c['Marcap']:,.0f}",
-            '현재가': f"{c['Close']:,.0f}",
-            '진입가': f"{c['Pivot']:,.0f}",
-            '거리': f"{c['VCP']['pivot_distance']:.1f}%",
-            '수축': f"{c['VCP']['contraction_ratio']:.1%}",
-            '파동': c['VCP']['wave_count']
-        } for c in candidates])
+            '순위': idx + 1,
+            '종목': r['Name'],
+            '시총(억)': f"{r['Marcap']:,.0f}",
+            '현재가': f"{r['current_price']:,.0f}",
+            '점수': f"{r['score']:.3f}",
+            '기본': f"{r['base_score']:.3f}",
+            '조용한양봉': f"{r['quiet_days']}일",
+            '저점유지': '✅' if r['low_hold'] else '❌',
+            '가격조임': f"{r['price_tightness']:.3f}",
+            '거래량': f"{r['volume_dryup']:.3f}"
+        } for idx, r in enumerate(results)])
+        
         st.dataframe(summary, use_container_width=True, hide_index=True)
     
     st.divider()
     
-    selected = st.selectbox("상세 분석 종목", [c['Name'] for c in candidates])
-    target = next(c for c in candidates if c['Name'] == selected)
+    # 상세 분석
+    st.subheader("📊 상세 분석")
     
-    stop, qty, total, pos_pct = calc_position(account, risk_pct, target['Pivot'], stop_pct)
+    selected = st.selectbox(
+        "종목 선택",
+        [f"{idx+1}위. {r['Name']} - {r['score']:.3f}" 
+         for idx, r in enumerate(results)]
+    )
     
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("현재가", f"{target['Close']:,.0f}원")
-    col2.metric("진입가", f"{target['Pivot']:,.0f}원", f"{target['VCP']['pivot_distance']:+.1f}%")
-    col3.metric("손절가", f"{stop:,.0f}원", f"-{stop_pct}%")
-    col4.metric("수량", f"{qty:,}주", f"{pos_pct:.1f}%")
+    selected_idx = int(selected.split('위')[0]) - 1
+    target = results[selected_idx]
     
-    fig = plot_chart(target['df'], target['Name'], target['Code'],
-                     target['Pivot'], stop, target['VCP'])
+    # 지표
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    col1.metric("순위", f"{selected_idx + 1}위")
+    col2.metric("최종점수", f"{target['score']:.3f}")
+    col3.metric("기본점수", f"{target['base_score']:.3f}")
+    col4.metric("조용한양봉", f"{target['quiet_days']}일")
+    col5.metric("저점유지", "✅" if target['low_hold'] else "❌")
+    
+    # 보너스 상세
+    st.markdown(
+        f'<div class="bonus-box">'
+        f'<b>보너스 적용 내역</b><br>'
+        f'• 기본 점수: {target["base_score"]:.3f}<br>'
+        f'• 조용한 양봉 보너스: ×{target["quiet_bonus"]:.2f} ({target["quiet_days"]}일 연속)<br>'
+        f'• 저점 유지 보너스: ×{target["low_hold_bonus"]:.2f} '
+        f'(최근저점 {target["recent_low"]:,.0f} vs 장기저점 {target["long_low"]:,.0f})<br>'
+        f'• <b>최종 점수: {target["score"]:.3f}</b>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+    
+    # 차트
+    fig = plot_chart(target['df'], target['Name'], target['Code'], target)
     st.plotly_chart(fig, use_container_width=True)
     
-    with st.expander("🔬 VCP 상세"):
-        vcp = target['VCP']
-        st.write(f"- 파동 개수: {vcp['wave_count']}")
-        st.write(f"- 수축 비율: {vcp['contraction_ratio']:.1%}")
-        st.write(f"- 핸들 변동성: {vcp['handle_vol']:.2%}")
-        st.write(f"- 거래량 비율: {vcp['volume_ratio']:.1%}")
-        st.write(f"- 베이스 기간: {vcp['base_days']}일")
+    # 상세 지표
+    with st.expander("🔬 상세 지표"):
+        st.markdown(f"""
+        ### {target['Name']} 상세 분석
+        
+        **최종 점수: {target['score']:.3f}**
+        
+        #### 점수 구성:
+        - 기본: {target['base_score']:.3f}
+        - 조용한 양봉: ×{target['quiet_bonus']:.2f} ({target['quiet_days']}일)
+        - 저점 유지: ×{target['low_hold_bonus']:.2f}
+        
+        #### 1. 가격 조임: {target['price_tightness']:.3f}
+        - {'✅ 매우 조여짐' if target['price_tightness'] < 0.3 else '⚠️ 보통' if target['price_tightness'] < 0.5 else '❌ 약함'}
+        
+        #### 2. 거래량: {target['volume_dryup']:.3f}
+        - {'✅ 매도세력 소진' if target['volume_dryup'] < 0.4 else '⚠️ 보통' if target['volume_dryup'] < 0.6 else '❌ 변동 큼'}
+        
+        #### 3. 레인지: {target['range_ratio']:.3f}
+        - {'✅ 매우 좁음' if target['range_ratio'] < 0.4 else '⚠️ 보통' if target['range_ratio'] < 0.6 else '❌ 넓음'}
+        
+        #### 4. 조용한 양봉 연속:
+        - {target['quiet_days']}일 연속 발생
+        - ATR: {target['atr']:,.0f}원
+        - 기준: 몸통 ≤ ATR × 0.4
+        
+        #### 5. 저점 유지:
+        - 최근 저점: {target['recent_low']:,.0f}원
+        - 장기 저점: {target['long_low']:,.0f}원
+        - 비율: {(target['recent_low']/target['long_low']):.2%}
+        - {'✅ 저점 유지 중' if target['low_hold'] else '❌ 저점 하향'}
+        """)
+    
+    st.info("""
+    💡 **이 스캐너는 VCP 판별이 아닌 랭킹입니다**
+    - 최종 판단은 차트로 직접 확인
+    - 진입가/손절가는 별도 계산기 사용
+    """)
