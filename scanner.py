@@ -267,7 +267,8 @@ with st.sidebar:
     st.divider()
     
     st.markdown("### 🎯 결과")
-    top_n = st.slider("상위", 10, 100, 30, 5)
+    top_n = st.slider("가장 조여진 N개", 10, 100, 30, 5,
+                     help="점수 낮은 순 = 더 조여진 순")
     
     st.divider()
     
@@ -328,7 +329,7 @@ if st.session_state.get('run'):
             st.session_state['results'] = ranking.to_dict('records')
             st.session_state['run'] = False
             
-            st.success(f"✅ {len(ranking)}개 발견!")
+            st.success(f"✅ {len(ranking)}개 발견! (점수 낮은 순 = 조여진 순)")
 
 # -----------------------------------------------------------
 # 7. 결과
@@ -361,9 +362,9 @@ if not results:
         4. 캐시 유지로 최신 상태 보존
         """)
 else:
-    st.success(f"🎯 상위 {len(results)}개")
+    st.success(f"🎯 가장 조여진 {len(results)}개 (점수 낮은 순)")
     
-    with st.expander("📋 랭킹", expanded=True):
+    with st.expander("📋 전체 랭킹 (점수 낮은 순)", expanded=True):
         summary = pd.DataFrame([{
             '순위': idx + 1,
             '종목': r['Name'],
@@ -381,7 +382,7 @@ else:
     st.subheader("📊 상세")
     
     selected = st.selectbox(
-        "종목",
+        "종목 선택 (1위 = 가장 조여짐)",
         [f"{idx+1}. {r['Name']} - {r['score']:.3f}" 
          for idx, r in enumerate(results)]
     )
