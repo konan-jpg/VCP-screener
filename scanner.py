@@ -74,11 +74,7 @@ def get_stock_data(code, days=200):
 # 3. VCP 파동 구조 인식 함수
 # -----------------------------------------------------------
 def clean_zigzag_swings(swings):
-    """
-    연속된 같은 타입의 스윙 정리
-    - 고점이 연속되면 가장 높은 것만
-    - 저점이 연속되면 가장 낮은 것만
-    """
+    """연속된 같은 타입의 스윙 정리"""
     if len(swings) < 2:
         return swings
     
@@ -89,35 +85,19 @@ def clean_zigzag_swings(swings):
         curr = swings[i]
         
         if prev['type'] == curr['type']:
-            # 같은 타입이 연속
             if prev['type'] == 'high':
-                # 더 높은 고점으로 교체
                 if curr['price'] > prev['price']:
                     cleaned[-1] = curr
-            else:  # 'low'
-                # 더 낮은 저점으로 교체
+            else:
                 if curr['price'] < prev['price']:
                     cleaned[-1] = curr
         else:
-            # 타입이 다르면 추가
             cleaned.append(curr)
     
     return cleaned
 
 def detect_swings_hl(high, low, close, atr, lookback=60):
-    """
-    High/Low 기준 스윙 고점·저점 추출 (ATR 기반 필터링)
-    
-    Args:
-        high: High 시리즈
-        low: Low 시리즈
-        close: Close 시리즈
-        atr: Average True Range
-        lookback: 분석 기간
-    
-    Returns:
-        list of dict: [{'type': 'high'|'low', 'price': float, 'date': Timestamp, 'idx': int}, ...]
-    """
+    """High/Low 기준 스윙 고점·저점 추출"""
     if len(high) < lookback:
         return []
     
@@ -125,10 +105,9 @@ def detect_swings_hl(high, low, close, atr, lookback=60):
     low_series = low.tail(lookback)
     
     swings = []
-    window = 5  # 전후 5일 기준 로컬 극값
-    min_swing_size = atr * 1.5  # ATR의 1.5배 이상만 의미 있는 파동
+    window = 5
+    min_swing_size = atr * 1.5
     
-    # 로컬 고점 찾기
     for i in range(window, len(high_series) - window):
         local_high = high_series.iloc[i]
         is_peak = True
@@ -146,7 +125,6 @@ def detect_swings_hl(high, low, close, atr, lookback=60):
                 'idx': i
             })
     
-    # 로컬 저점 찾기
     for i in range(window, len(low_series) - window):
         local_low = low_series.iloc[i]
         is_trough = True
@@ -164,13 +142,9 @@ def detect_swings_hl(high, low, close, atr, lookback=60):
                 'idx': i
             })
     
-    # 시간순 정렬
     swings.sort(key=lambda x: x['date'])
-    
-    # 지그재그 정리 (같은 타입 연속 제거)
     swings = clean_zigzag_swings(swings)
     
-    # ATR 기반 필터링 (너무 작은 움직임 제거)
     filtered_swings = []
     for i in range(len(swings)):
         if i == 0:
@@ -187,25 +161,8 @@ def detect_swings_hl(high, low, close, atr, lookback=60):
     return filtered_swings
 
 def validate_vcp_structure(swings, atr):
-    """
-    VCP 구조 검증: 깊이 수축 + 고점 압력 감소 + 저점 지지 상승
-    
-    Args:
-        swings: detect_swings_hl() 결과
-        atr: Average True Range
-    
-    Returns:
-        dict: {
-            'is_vcp': bool,
-            'wave_bonus': float,
-            'depth_contraction': bool,
-            'duration_contraction': bool,
-            'highs_tightening': bool,
-            'lows_rising': bool,
-            'waves': list
-        }
-    """
-    if len(swings) < 6:  # 최소 3개 조정 파동 = 고점3 + 저점3
+    """VCP 구조 검증"""
+    if len(swings) < 6:
         return {
             'is_vcp': False,
             'wave_bonus': 1.8,
@@ -216,7 +173,6 @@ def validate_vcp_structure(swings, atr):
             'waves': []
         }
     
-    # 조정 파동 추출 (고점 → 저점)
     correction_waves = []
     for i in range(len(swings) - 1):
         if swings[i]['type'] == 'high' and swings[i+1]['type'] == 'low':
@@ -226,7 +182,6 @@ def validate_vcp_structure(swings, atr):
             depth = (high_price - low_price) / high_price
             duration = (swings[i+1]['date'] - swings[i]['date']).days
             
-            # 최소 깊이 1%, 최소 기간 2일
             if depth >= 0.01 and duration >= 2:
                 correction_waves.append({
                     'high_price': high_price,
@@ -248,10 +203,8 @@ def validate_vcp_structure(swings, atr):
             'waves': correction_waves
         }
     
-    # 최근 3개 파동 분석
     last_3_waves = correction_waves[-3:]
     
-    # 명시적 변수 분리 (문법 오류 방지)
     d1 = last_3_waves[0]['depth']
     d2 = last_3_waves[1]['depth']
     d3 = last_3_waves[2]['depth']
@@ -260,51 +213,31 @@ def validate_vcp_structure(swings, atr):
     dur2 = last_3_waves[1]['duration']
     dur3 = last_3_waves[2]['duration']
     
-    # ========================================
-    # 1. 깊이 수축 검증 (허용 오차 1%)
-    # ========================================
     depth_tolerance = 0.01
     depth_contraction = (d2 <= d1 + depth_tolerance) and (d3 <= d2 + depth_tolerance)
     
-    # ========================================
-    # 2. 기간 수축 검증 (허용 오차 3일)
-    # ========================================
     duration_tolerance = 3
     duration_contraction = (dur2 <= dur1 + duration_tolerance) and (dur3 <= dur2 + duration_tolerance)
     
-    # ========================================
-    # 3. 고점 압력 감소 (고점들이 수평 or 하향)
-    # ========================================
     recent_highs = [w['high_price'] for w in last_3_waves]
     high_range = max(recent_highs) - min(recent_highs)
-    
-    # ATR의 1.8배 이내로 고점들이 수렴 (1.2에서 완화)
     highs_tightening = high_range <= atr * 1.8
     
-    # ========================================
-    # 4. 저점 지지 상승 (저점들이 계단식 상승)
-    # ========================================
     recent_lows = [w['low_price'] for w in last_3_waves]
     low_tolerance = atr * 0.5
-    
-    # 각 저점이 이전 저점보다 높거나 유사
     lows_rising = all(
         recent_lows[i+1] >= recent_lows[i] - low_tolerance 
         for i in range(len(recent_lows) - 1)
     )
     
-    # ========================================
-    # 5. 최종 VCP 판정
-    # ========================================
     is_vcp = depth_contraction and duration_contraction and highs_tightening and lows_rising
     
-    # 구조 점수
     if is_vcp:
-        wave_bonus = 0.60  # 완전 VCP → 최상위
+        wave_bonus = 0.60
     elif depth_contraction and highs_tightening:
-        wave_bonus = 0.85  # 부분 통과 → 중상위
+        wave_bonus = 0.85
     else:
-        wave_bonus = 1.8   # 구조 미달 → 하위
+        wave_bonus = 1.8
     
     return {
         'is_vcp': is_vcp,
@@ -320,7 +253,7 @@ def validate_vcp_structure(swings, atr):
 # 4. VCP Scanner v4 Final
 # -----------------------------------------------------------
 def vcp_tightness_scanner(df, short_period=10, long_period=60, atr_period=20):
-    """VCP Scanner v4 Final - High/Low 기반 구조 인식 스캐너"""
+    """VCP Scanner v4 Final"""
     if df is None or len(df) < long_period + atr_period:
         return None
     
@@ -334,18 +267,12 @@ def vcp_tightness_scanner(df, short_period=10, long_period=60, atr_period=20):
     if current_price < 10_000:
         return None
     
-    # ========================================
-    # A. 생존 필터 (죽은 종목 즉시 제거)
-    # ========================================
     recent5_vol = volume.tail(5).mean()
     recent5_range = ((high.tail(5) - low.tail(5)) / close.tail(5)).mean()
     
     if recent5_vol == 0 or recent5_range < 0.005:
         return None
     
-    # ========================================
-    # B. ATR 계산 (파동 인식의 기준)
-    # ========================================
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = abs(high - prev_close)
@@ -357,20 +284,9 @@ def vcp_tightness_scanner(df, short_period=10, long_period=60, atr_period=20):
     if pd.isna(atr) or atr == 0:
         return None
     
-    # ========================================
-    # C. High/Low 기반 파동 추출
-    # ========================================
     swings = detect_swings_hl(high, low, close, atr, lookback=60)
-    
-    # ========================================
-    # D. VCP 구조 검증
-    # ========================================
     vcp_result = validate_vcp_structure(swings, atr)
     
-    # ========================================
-    # E. 기존 보조 지표 (같은 VCP끼리 정렬용)
-    # ========================================
-    # 1. Price Tightness
     std_price_short = close.tail(short_period).std()
     std_price_long = close.tail(long_period).std()
     
@@ -379,7 +295,6 @@ def vcp_tightness_scanner(df, short_period=10, long_period=60, atr_period=20):
     
     price_tightness = std_price_short / std_price_long
     
-    # 2. Volume Dry-up
     std_vol_short = volume.tail(short_period).std()
     std_vol_long = volume.tail(long_period).std()
     
@@ -388,7 +303,6 @@ def vcp_tightness_scanner(df, short_period=10, long_period=60, atr_period=20):
     
     volume_dryup = std_vol_short / std_vol_long
     
-    # 3. Range Contraction
     range_pct = (high - low) / close
     range_short = range_pct.tail(short_period).mean()
     range_long = range_pct.tail(long_period).mean()
@@ -398,7 +312,6 @@ def vcp_tightness_scanner(df, short_period=10, long_period=60, atr_period=20):
     
     range_ratio = range_short / range_long
     
-    # 4. 조용한 양봉
     quiet_days = 0
     for i in range(1, 4):
         if len(close) < i:
@@ -413,27 +326,19 @@ def vcp_tightness_scanner(df, short_period=10, long_period=60, atr_period=20):
     
     quiet_bonus = 1.0 - min(quiet_days * 0.05, 0.15)
     
-    # 5. 저점 유지력
     recent_low = low.tail(short_period).min()
     long_low = low.tail(long_period).min()
     
     low_hold = recent_low >= long_low * 1.01
     low_hold_bonus = 0.90 if low_hold else 1.0
     
-    # ========================================
-    # F. 최종 점수 계산
-    # ========================================
-    # 보조 지표 점수
     auxiliary_score = (
         price_tightness * 0.50 +
         volume_dryup * 0.30 +
         range_ratio * 0.20
     )
     
-    # 구조 점수 반영 (핵심 - 80% 가중치)
     structural_score = auxiliary_score * vcp_result['wave_bonus']
-    
-    # 보조 보너스 (20% 가중치)
     final_score = structural_score * quiet_bonus * low_hold_bonus
     
     return {
@@ -525,10 +430,7 @@ st.markdown("""
 **High/Low 기반 파동 구조 인식 스캐너**
 
 ✅ **구조 검증**: 깊이 수축 + 고점 압력 감소 + 저점 지지 상승  
-✅ **ATR 필터링**: 종목별 변동성 반영한 동적 threshold  
-✅ **지그재그 정리**: 연속된 같은 타입 스윙 자동 정리  
-✅ **생존 필터**: 거래정지/죽은 종목 즉시 제거  
-✅ **점수 체계**: VCP 구조 통과 시 0.60배 / 부분 통과 0.85배 / 실패 1.8배
+✅ **클릭으로 차트 확인**: 테이블에서 행을 클릭하면 바로 차트가 변경됩니다
 """)
 
 with st.sidebar:
@@ -613,113 +515,95 @@ if st.session_state.get('run'):
             st.success(f"✅ {len(ranking)}개 발견! (완전 VCP: {vcp_count}개 / 부분 통과: {partial_count}개)")
 
 # -----------------------------------------------------------
-# 8. 결과
+# 8. 결과 (테이블 클릭 → 차트 변경)
 # -----------------------------------------------------------
 results = st.session_state['results']
 
 if not results:
     st.info("👈 설정 후 스캔")
-    
-    with st.expander("💡 v4 Final 핵심 개선사항"):
-        st.markdown("""
-        ### 🎯 ChatGPT 지적사항 100% 반영
-        
-        **1. 문법 오류 수정**
-        - 변수 명시적 분리: d1, d2, d3 / dur1, dur2, dur3
-        
-        **2. 지그재그 정리 로직 추가**
-        - `clean_zigzag_swings()` 함수 신규 추가
-        - 고점 연속 → 가장 높은 것만 유지
-        - 저점 연속 → 가장 낮은 것만 유지
-        - 파동 누락 문제 해결
-        
-        **3. highs_tightening 기준 완화**
-        - ATR * 1.2 → ATR * 1.8로 조정
-        - 성장주/변동성 큰 종목 탈락 방지
-        
-        **4. High/Low 기반 파동 추출**
-        - Close 기준 ❌ → High/Low 기준 ✅
-        - 장중 위꼬리/아래꼬리 = 공급/수요 흔적 포착
-        
-        **5. 3중 구조 검증**
-        - ✅ 깊이 수축 (depth ↓)
-        - ✅ 고점 압력 감소 (highs → 수평)
-        - ✅ 저점 지지 상승 (lows ↑ 계단식)
-        
-        **예상 정확도: 92점**
-        """)
 else:
     vcp_count = sum([1 for r in results if r.get('is_vcp')])
     partial_count = sum([1 for r in results if not r.get('is_vcp') and r.get('wave_bonus') < 1.5])
     
     st.success(f"🎯 상위 {len(results)}개 | 완전 VCP: {vcp_count}개 | 부분 통과: {partial_count}개")
     
-    with st.expander("📋 전체 랭킹", expanded=True):
-        summary = pd.DataFrame([{
-            '순위': idx + 1,
-            '종목': r['Name'],
-            'VCP': '✅' if r.get('is_vcp') else '⚠️' if r.get('wave_bonus') < 1.5 else '❌',
-            '시총(억)': f"{r['Marcap']:,.0f}",
-            '현재가': f"{r['current_price']:,.0f}",
-            '점수': f"{r['score']:.3f}",
-            '깊이': '✅' if r.get('depth_contraction') else '❌',
-            '고점': '✅' if r.get('highs_tightening') else '❌',
-            '저점': '✅' if r.get('lows_rising') else '❌',
-            '파동': r.get('wave_count', 0)
-        } for idx, r in enumerate(results)])
-        
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.markdown("### 📋 전체 랭킹 (행을 클릭하면 아래 차트가 변경됩니다)")
+    
+    # 테이블용 DataFrame 생성
+    summary_df = pd.DataFrame([{
+        '순위': idx + 1,
+        '종목': r['Name'],
+        'VCP': '✅' if r.get('is_vcp') else '⚠️' if r.get('wave_bonus') < 1.5 else '❌',
+        '시총(억)': f"{r['Marcap']:,.0f}",
+        '현재가': f"{r['current_price']:,.0f}",
+        '점수': f"{r['score']:.3f}",
+        '깊이': '✅' if r.get('depth_contraction') else '❌',
+        '고점': '✅' if r.get('highs_tightening') else '❌',
+        '저점': '✅' if r.get('lows_rising') else '❌',
+        '파동': r.get('wave_count', 0)
+    } for idx, r in enumerate(results)])
+    
+    # st.data_editor로 행 선택 가능
+    edited_df = st.data_editor(
+        summary_df,
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        key="ranking_table",
+        disabled=True
+    )
     
     st.divider()
     
-    st.subheader("📊 상세 분석")
+    # ✅ 수정된 부분: 올바른 API 호출
+    selected_rows = st.session_state.get("ranking_table", {}).get("selected_rows", [])
     
-    selected = st.selectbox(
-        "종목 선택",
-        [f"{idx+1}. {'✅' if r.get('is_vcp') else '⚠️' if r.get('wave_bonus')<1.5 else '❌'} {r['Name']} - {r['score']:.3f}" 
-         for idx, r in enumerate(results)]
-    )
-    
-    idx = int(selected.split('.')[0]) - 1
-    target = results[idx]
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("순위", f"{idx + 1}")
-    col2.metric("완전 VCP", "✅" if target.get('is_vcp') else "❌")
-    col3.metric("점수", f"{target['score']:.3f}")
-    col4.metric("파동 배수", f"{target['wave_bonus']:.2f}x")
-    
-    col5, col6, col7, col8 = st.columns(4)
-    col5.metric("깊이 수축", "✅" if target.get('depth_contraction') else "❌")
-    col6.metric("고점 압력↓", "✅" if target.get('highs_tightening') else "❌")
-    col7.metric("저점 지지↑", "✅" if target.get('lows_rising') else "❌")
-    col8.metric("파동 수", target.get('wave_count', 0))
-    
-    fig = plot_chart(target['df'], target['Name'], target['Code'], target)
-    st.plotly_chart(fig, use_container_width=True)
-    
-    with st.expander("🔬 상세 지표"):
-        detail_df = pd.DataFrame([{
-            '지표': '보조 점수',
-            '값': f"{target['auxiliary_score']:.3f}"
-        }, {
-            '지표': 'Price Tightness',
-            '값': f"{target['price_tightness']:.3f}"
-        }, {
-            '지표': 'Volume Dry-up',
-            '값': f"{target['volume_dryup']:.3f}"
-        }, {
-            '지표': 'Range Ratio',
-            '값': f"{target['range_ratio']:.3f}"
-        }, {
-            '지표': '조용한 양봉',
-            '값': f"{target['quiet_days']}일"
-        }, {
-            '지표': '저점 유지',
-            '값': '✅' if target.get('low_hold') else '❌'
-        }, {
-            '지표': 'ATR',
-            '값': f"{target['atr']:,.0f}"
-        }])
+    if selected_rows:
+        selected_idx = selected_rows[0]
+        target = results[selected_idx]
         
-        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+        st.subheader(f"📊 {target['Name']} 상세 분석")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("순위", f"{selected_idx + 1}")
+        col2.metric("완전 VCP", "✅" if target.get('is_vcp') else "❌")
+        col3.metric("점수", f"{target['score']:.3f}")
+        col4.metric("파동 배수", f"{target['wave_bonus']:.2f}x")
+        
+        col5, col6, col7, col8 = st.columns(4)
+        col5.metric("깊이 수축", "✅" if target.get('depth_contraction') else "❌")
+        col6.metric("고점 압력↓", "✅" if target.get('highs_tightening') else "❌")
+        col7.metric("저점 지지↑", "✅" if target.get('lows_rising') else "❌")
+        col8.metric("파동 수", target.get('wave_count', 0))
+        
+        fig = plot_chart(target['df'], target['Name'], target['Code'], target)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        with st.expander("🔬 상세 지표"):
+            detail_df = pd.DataFrame([{
+                '지표': '보조 점수',
+                '값': f"{target['auxiliary_score']:.3f}"
+            }, {
+                '지표': 'Price Tightness',
+                '값': f"{target['price_tightness']:.3f}"
+            }, {
+                '지표': 'Volume Dry-up',
+                '값': f"{target['volume_dryup']:.3f}"
+            }, {
+                '지표': 'Range Ratio',
+                '값': f"{target['range_ratio']:.3f}"
+            }, {
+                '지표': '조용한 양봉',
+                '값': f"{target['quiet_days']}일"
+            }, {
+                '지표': '저점 유지',
+                '값': '✅' if target.get('low_hold') else '❌'
+            }, {
+                '지표': 'ATR',
+                '값': f"{target['atr']:,.0f}"
+            }])
+            
+            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("👆 위 테이블에서 종목을 클릭하면 차트가 표시됩니다")
+
