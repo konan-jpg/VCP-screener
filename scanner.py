@@ -270,7 +270,7 @@ def validate_vcp_structure(swings, atr):
     elif depth_contraction and highs_tightening:
         wave_bonus = 0.85
     else:
-        wave_bonus = 1.8
+        wave_bonus = .8
     
     return {
         'is_vcp': is_vcp,
@@ -463,7 +463,7 @@ st.markdown("""
 **High/Low 기반 파동 구조 인식 스캐너**
 
 ✅ **구조 검증**: 깊이 수축 + 고점 압력 감소 + 저점 지지 상승  
-✅ **종목 선택**: 라디오 버튼으로 종목을 선택하면 차트가 변경됩니다  
+✅ **테이블 클릭**: 상세 분석 테이블에서 종목을 클릭하면 차트가 변경됩니다  
 ✅ **ATR 필터링**: 종목별 변동성 반영한 동적 threshold  
 ✅ **생존 필터**: 거래정지/죽은 종목 즉시 제거  
 ✅ **점수 체계**: VCP 구조 통과 시 0.60배 / 부분 통과 0.85배 / 실패 1.8배
@@ -492,9 +492,12 @@ with st.sidebar:
     if st.button("🚀 스캔", type="primary", use_container_width=True):
         st.session_state['run'] = True
         st.session_state['results'] = []
+        st.session_state['selected_idx'] = 0
 
 if 'results' not in st.session_state:
     st.session_state['results'] = []
+if 'selected_idx' not in st.session_state:
+    st.session_state['selected_idx'] = 0
 
 # -----------------------------------------------------------
 # 7. 스캔 실행
@@ -544,6 +547,7 @@ if st.session_state.get('run'):
         else:
             ranking = pd.DataFrame(results).sort_values('score').head(top_n)
             st.session_state['results'] = ranking.to_dict('records')
+            st.session_state['selected_idx'] = 0
             st.session_state['run'] = False
             
             vcp_count = sum([1 for r in ranking.to_dict('records') if r.get('is_vcp')])
@@ -551,7 +555,7 @@ if st.session_state.get('run'):
             st.success(f"✅ {len(ranking)}개 발견! (완전 VCP: {vcp_count}개 / 부분 통과: {partial_count}개)")
 
 # -----------------------------------------------------------
-# 8. 결과 (라디오 버튼 방식)
+# 8. 결과 (테이블 클릭 방식)
 # -----------------------------------------------------------
 results = st.session_state['results']
 
@@ -571,8 +575,8 @@ if not results:
         - ✅ 고점 압력 감소 (highs → 수평)
         - ✅ 저점 지지 상승 (lows ↑ 계단식)
         
-        **3. 안정적인 UX**
-        - 라디오 버튼으로 종목 선택
+        **3. 테이블 클릭 UX**
+        - 상세 분석 테이블에서 종목 클릭
         - 즉시 차트 변경
         
         **예상 정확도: 92점**
@@ -583,81 +587,80 @@ else:
     
     st.success(f"🎯 상위 {len(results)}개 | 완전 VCP: {vcp_count}개 | 부분 통과: {partial_count}개")
     
-    with st.expander("📋 전체 랭킹", expanded=True):
-        summary_df = pd.DataFrame([{
-            '순위': idx + 1,
-            '종목': r['Name'],
-            'VCP': '✅' if r.get('is_vcp') else '⚠️' if r.get('wave_bonus') < 1.5 else '❌',
-            '시총(억)': f"{r['Marcap']:,.0f}",
-            '현재가': f"{r['current_price']:,.0f}",
-            '점수': f"{r['score']:.3f}",
-            '깊이': '✅' if r.get('depth_contraction') else '❌',
-            '고점': '✅' if r.get('highs_tightening') else '❌',
-            '저점': '✅' if r.get('lows_rising') else '❌',
-            '파동': r.get('wave_count', 0)
-        } for idx, r in enumerate(results)])
-        
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
-    
     st.divider()
     
-    st.subheader("📊 상세 분석")
+    # 2단 레이아웃: 왼쪽 테이블, 오른쪽 차트
+    col_left, col_right = st.columns([1, 2])
     
-    stock_options = [
-        f"{idx+1}. {'✅' if r.get('is_vcp') else '⚠️' if r.get('wave_bonus')<1.5 else '❌'} {r['Name']} (점수: {r['score']:.3f})" 
-        for idx, r in enumerate(results)
-    ]
-    
-    selected_option = st.radio(
-        "종목을 선택하세요",
-        stock_options,
-        label_visibility="collapsed"
-    )
-    
-    selected_idx = int(selected_option.split('.')[0]) - 1
-    target = results[selected_idx]
-    
-    st.markdown(f"### {target['Name']}")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("순위", f"{selected_idx + 1}")
-    col2.metric("완전 VCP", "✅" if target.get('is_vcp') else "❌")
-    col3.metric("점수", f"{target['score']:.3f}")
-    col4.metric("파동 배수", f"{target['wave_bonus']:.2f}x")
-    
-    col5, col6, col7, col8 = st.columns(4)
-    col5.metric("깊이 수축", "✅" if target.get('depth_contraction') else "❌")
-    col6.metric("고점 압력↓", "✅" if target.get('highs_tightening') else "❌")
-    col7.metric("저점 지지↑", "✅" if target.get('lows_rising') else "❌")
-    col8.metric("파동 수", target.get('wave_count', 0))
-    
-    fig = plot_chart(target['df'], target['Name'], target['Code'], target)
-    st.plotly_chart(fig, use_container_width=True)
-    
-    with st.expander("🔬 상세 지표"):
-        detail_df = pd.DataFrame([{
-            '지표': '보조 점수',
-            '값': f"{target['auxiliary_score']:.3f}"
-        }, {
-            '지표': 'Price Tightness',
-            '값': f"{target['price_tightness']:.3f}"
-        }, {
-            '지표': 'Volume Dry-up',
-            '값': f"{target['volume_dryup']:.3f}"
-        }, {
-            '지표': 'Range Ratio',
-            '값': f"{target['range_ratio']:.3f}"
-        }, {
-            '지표': '조용한 양봉',
-            '값': f"{target['quiet_days']}일"
-        }, {
-            '지표': '저점 유지',
-            '값': '✅' if target.get('low_hold') else '❌'
-        }, {
-            '지표': 'ATR',
-            '값': f"{target['atr']:,.0f}"
-        }])
+    with col_left:
+        st.subheader("📋 상세 분석")
         
-        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+        # 클릭 가능한 테이블 생성
+        for idx, r in enumerate(results):
+            vcp_icon = '✅' if r.get('is_vcp') else '⚠️' if r.get('wave_bonus') < 1.5 else '❌'
+            
+            # 선택된 종목 강조
+            if idx == st.session_state['selected_idx']:
+                button_type = "primary"
+            else:
+                button_type = "secondary"
+            
+            # 버튼으로 클릭 가능하게
+            if st.button(
+                f"{idx+1}. {vcp_icon} {r['Name']} ({r['score']:.3f})",
+                key=f"stock_{idx}",
+                type=button_type,
+                use_container_width=True
+            ):
+                st.session_state['selected_idx'] = idx
+                st.rerun()
+    
+    with col_right:
+        # 선택된 종목 차트 표시
+        selected_idx = st.session_state['selected_idx']
+        target = results[selected_idx]
+        
+        st.subheader(f"📊 {target['Name']} 상세 분석")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("순위", f"{selected_idx + 1}")
+        col2.metric("완전 VCP", "✅" if target.get('is_vcp') else "❌")
+        col3.metric("점수", f"{target['score']:.3f}")
+        col4.metric("파동 배수", f"{target['wave_bonus']:.2f}x")
+        
+        col5, col6, col7, col8 = st.columns(4)
+        col5.metric("깊이 수축", "✅" if target.get('depth_contraction') else "❌")
+        col6.metric("고점 압력↓", "✅" if target.get('highs_tightening') else "❌")
+        col7.metric("저점 지지↑", "✅" if target.get('lows_rising') else "❌")
+        col8.metric("파동 수", target.get('wave_count', 0))
+        
+        fig = plot_chart(target['df'], target['Name'], target['Code'], target)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        with st.expander("🔬 상세 지표"):
+            detail_df = pd.DataFrame([{
+                '지표': '보조 점수',
+                '값': f"{target['auxiliary_score']:.3f}"
+            }, {
+                '지표': 'Price Tightness',
+                '값': f"{target['price_tightness']:.3f}"
+            }, {
+                '지표': 'Volume Dry-up',
+                '값': f"{target['volume_dryup']:.3f}"
+            }, {
+                '지표': 'Range Ratio',
+                '값': f"{target['range_ratio']:.3f}"
+            }, {
+                '지표': '조용한 양봉',
+                '값': f"{target['quiet_days']}일"
+            }, {
+                '지표': '저점 유지',
+                '값': '✅' if target.get('low_hold') else '❌'
+            }, {
+                '지표': 'ATR',
+                '값': f"{target['atr']:,.0f}"
+            }])
+            
+            st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 
