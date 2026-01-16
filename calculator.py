@@ -9,31 +9,30 @@ import plotly.graph_objects as go
 # 기본 설정
 # -------------------------------------------------
 st.set_page_config(page_title="VCP Multi-Entry Calculator", layout="wide")
-st.title("🎯 VCP 다중 타점 계산기")
+st.title("🎯 VCP 다중 타점 계산기 (미너비니식 구조 스탑)")
 
 st.markdown("""
 **VCP 완성 종목 전용 · 4가지 타점 자동 분석**
 
 - 정석 VCP / Cheat / Low Cheat / Pullback
 - 타점별 Entry · Stop · R 자동 계산
+- **모든 타점: 구조 기반 손절 (ATR 버퍼 적용)**
 - 신뢰도 점수 (같은 종목 내 비교용)
-- ✅ 현재가 + 20일 ATR (변동성 참고용)
 """)
 
-st.caption("※ ATR은 참고용 정보이며, 버퍼(스탑 여유폭) 계산에만 사용됩니다.")
+st.caption("※ 모든 손절가는 '구조적 무효화 지점(스윙/타이트 구간 저점) - ATR 버퍼'로 계산됩니다.")
 
 # -------------------------------------------------
 # 종목명/코드 매핑
 # -------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_krx_listing():
-    """KRX 종목 리스트: 서버 실패 시 백업 CSV 사용"""
+    """KRX 종목 리스트"""
     try:
         kospi = fdr.StockListing('KOSPI')
         kosdaq = fdr.StockListing('KOSDAQ')
         stocks = pd.concat([kospi, kosdaq], ignore_index=True)
         
-        # 컬럼 정규화
         if 'Symbol' in stocks.columns:
             stocks = stocks.rename(columns={'Symbol': 'Code'})
         elif 'code' in stocks.columns:
@@ -41,7 +40,6 @@ def load_krx_listing():
         
         stocks['Code'] = stocks['Code'].astype(str).str.zfill(6)
         return stocks[['Code', 'Name']].dropna().drop_duplicates()
-        
     except:
         try:
             backup = pd.read_csv('krx_backup.csv')
@@ -49,35 +47,29 @@ def load_krx_listing():
                 backup = backup.rename(columns={'Symbol': 'Code'})
             elif 'code' in backup.columns:
                 backup = backup.rename(columns={'code': 'Code'})
-            
             backup['Code'] = backup['Code'].astype(str).str.zfill(6)
             return backup[['Code', 'Name']].dropna().drop_duplicates()
         except:
             return pd.DataFrame(columns=['Code', 'Name'])
 
 def resolve_code(user_input: str, listing: pd.DataFrame):
-    """사용자 입력이 코드(6자리)면 그대로, 아니면 종목명 부분일치로 Code 반환"""
+    """종목코드/종목명 → Code 변환"""
     s = (user_input or "").strip()
     if not s:
         return None, None
 
-    # 6자리 숫자면 코드로 간주
     if s.isdigit():
         code = s.zfill(6)
-        name = None
         m = listing[listing["Code"] == code]
-        if len(m) > 0:
-            name = m.iloc[0]["Name"]
+        name = m.iloc[0]["Name"] if len(m) > 0 else None
         return code, name
 
-    # 종목명 검색 (부분일치)
     hits = listing[listing["Name"].str.contains(s, case=False, na=False)]
     if len(hits) == 0:
         return None, None
     if len(hits) == 1:
         return hits.iloc[0]["Code"], hits.iloc[0]["Name"]
 
-    # 여러 개면 선택
     options = [f"{r.Name} ({r.Code})" for r in hits.itertuples(index=False)]
     picked = st.selectbox("동일/유사 종목명이 여러 개입니다. 선택하세요.", options)
     code = picked.split("(")[-1].replace(")", "").strip()
@@ -176,50 +168,63 @@ def find_low_cheat_trigger(df, lookback=60):
     if len(hits) == 0:
         return None
 
-    trigger_idx = hits.index[-1]
-    return df.loc[trigger_idx]
+    return df.loc[hits.index[-1]]
 
 # -------------------------------------------------
-# 타점 계산
+# 타점 계산 (미너비니식 구조 스탑)
 # -------------------------------------------------
 def calculate_entries(df, atr_buffer_mult=0.3):
-    """4가지 타점 계산 (Low Cheat은 ATR 기반 버퍼 적용)"""
+    """4가지 진입타점 계산 (모두 구조 기반 손절 + ATR 버퍼)"""
     recent = df.tail(120)
-
-    base_high = recent["High"].max()
-    base_low = recent["Low"].min()
+    atr20 = recent["ATR20"].iloc[-1]
+    
+    # ATR 없으면 fallback
+    if pd.isna(atr20) or atr20 <= 0:
+        atr20 = recent["Close"].iloc[-1] * 0.02
+    
+    buffer = atr_buffer_mult * atr20
+    
+    base_high = float(recent["High"].max())
+    base_low = float(recent["Low"].min())
     base_range = base_high - base_low
     upper_third = base_low + base_range * 0.66
-
-    # 정석 VCP
+    
+    # 1) 정석 VCP
     vcp_entry = base_high
-    vcp_stop = base_high * 0.95
-
-    # Cheat Entry
+    tight_zone = recent.tail(20)
+    vcp_structure_low = float(tight_zone["Low"].min())
+    vcp_stop = max(100.0, vcp_structure_low - buffer)
+    
+    # 2) Cheat Entry
     cheat_zone = recent[recent["High"] >= upper_third]
-    cheat_entry = cheat_zone["High"].tail(20).max() if len(cheat_zone) else base_high * 0.98
-    cheat_stop = cheat_entry * 0.96
-
-    # Low Cheat (미너비니식: 트리거 고가 돌파 / 트리거 저가 - ATR버퍼)
+    if len(cheat_zone) > 0:
+        cheat_entry = float(cheat_zone["High"].tail(20).max())
+        cheat_structure_low = float(cheat_zone["Low"].min())
+        cheat_stop = max(100.0, cheat_structure_low - buffer)
+    else:
+        cheat_entry = base_high * 0.98
+        cheat_stop = max(100.0, vcp_structure_low - buffer)
+    
+    # 3) Low Cheat
     trigger = find_low_cheat_trigger(df, lookback=60)
     if trigger is not None and not pd.isna(trigger["ATR20"]):
-        low_cheat_entry = float(trigger["High"])
-        low_cheat_stop = max(100.0, float(trigger["Low"] - atr_buffer_mult * trigger["ATR20"]))
+        low_entry = float(trigger["High"])
+        low_stop = max(100.0, float(trigger["Low"] - atr_buffer_mult * trigger["ATR20"]))
     else:
-        low_cheat_entry = float(recent["High"].tail(10).max())
-        atr20 = recent["ATR20"].iloc[-1]
-        buffer = float(atr_buffer_mult * atr20) if not pd.isna(atr20) else 0.0
-        low_cheat_stop = max(100.0, float(recent["Low"].tail(10).min() - buffer))
-
-    # Pullback
-    pullback_entry = base_high
-    pullback_stop = base_high * 0.97
-
+        low_entry = float(recent["High"].tail(10).max())
+        low_stop = max(100.0, float(recent["Low"].tail(10).min() - buffer))
+    
+    # 4) Pullback
+    pull_entry = base_high
+    pullback_zone = recent.tail(10)
+    pull_structure_low = float(pullback_zone["Low"].min())
+    pull_stop = max(100.0, pull_structure_low - buffer)
+    
     return {
         "정석 VCP": (vcp_entry, vcp_stop),
         "Cheat": (cheat_entry, cheat_stop),
-        "Low Cheat": (low_cheat_entry, low_cheat_stop),
-        "Pullback": (pullback_entry, pullback_stop)
+        "Low Cheat": (low_entry, low_stop),
+        "Pullback": (pull_entry, pull_stop),
     }
 
 # -------------------------------------------------
@@ -271,28 +276,28 @@ with col_input:
         help="코드(6자리) 또는 종목명(부분일치) 입력"
     )
 
-    atr_buffer_mult = st.slider("Low Cheat ATR 버퍼 배수", 0.1, 1.0, 0.3, 0.1)
-    st.caption("예: 0.3이면 손절 = 트리거 저가 - 0.3×ATR20")
+    atr_buffer_mult = st.slider("ATR 버퍼 배수 (모든 타점 공통)", 0.1, 1.0, 0.3, 0.1)
+    st.caption("손절 = 구조 저점 - (ATR × 버퍼)")
 
     st.divider()
 
-    with st.expander("💡 타점 설명"):
+    with st.expander("💡 타점 설명 (미너비니식)"):
         st.markdown("""
 **정석 VCP**
-- Entry: 최근 120일 베이스 최고가
-- Stop: Entry -5%
+- Entry: 베이스 최고가
+- Stop: 마지막 타이트 구간(20일) 저점 - ATR버퍼
 
 **Cheat**
-- Entry: 베이스 상단 1/3 영역에서 최근 고점
-- Stop: Entry -4%
+- Entry: 베이스 상단 1/3 고점
+- Stop: 상단 1/3 구간 저점 - ATR버퍼
 
 **Low Cheat**
-- Entry: 트리거 바(강한 양봉+거래량) 고가 돌파
-- Stop: 트리거 바 저가 - (ATR 버퍼)
+- Entry: 트리거 바(강한 양봉) 고가
+- Stop: 트리거 바 저점 - ATR버퍼
 
 **Pullback**
-- Entry: 베이스 최고가
-- Stop: Entry -3%
+- Entry: 베이스 최고가 (재테스트)
+- Stop: 풀백 구간(10일) 저점 - ATR버퍼
 """)
 
 with col_output:
@@ -302,12 +307,12 @@ with col_output:
         code, name = resolve_code(user_input, listing)
 
         if not code:
-            st.error("❌ 종목을 찾지 못했습니다. (코드/종목명 확인)")
+            st.error("❌ 종목을 찾지 못했습니다.")
         else:
             if name:
-                st.subheader(f"📌 선택 종목: {name} ({code})")
+                st.subheader(f"📌 {name} ({code})")
             else:
-                st.subheader(f"📌 선택 종목: {code}")
+                st.subheader(f"📌 {code}")
 
             df = load_data(code)
             if df is None:
@@ -316,7 +321,6 @@ with col_output:
                 df = prepare_indicators(df)
                 current_price = float(df["Close"].iloc[-1])
                 
-                # 현재가 표시 (상단에 크게)
                 st.metric("🔹 현재가", f"{current_price:,.0f}원", 
                          delta=f"{((current_price - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100):.2f}%")
                 
@@ -366,15 +370,13 @@ with col_output:
 - 현재가 대비: {best['현재가 대비(%)']:+.1f}%
 """)
 
-                recommended_entry = best["진입가"]
                 dist_pct = best['현재가 대비(%)']
-
                 if dist_pct < -3:
                     st.warning(f"⚠️ 이미 돌파됨 (현재가: {current_price:,.0f}원)")
                 elif dist_pct > 10:
-                    st.info(f"💡 진입가까지 {dist_pct:.1f}% 떨어져 있음 (현재가: {current_price:,.0f}원)")
+                    st.info(f"💡 진입가까지 {dist_pct:.1f}% 떨어져 있음")
                 else:
-                    st.success(f"✅ 진입 대기 구간 (현재가: {current_price:,.0f}원, {dist_pct:+.1f}%)")
+                    st.success(f"✅ 진입 대기 구간 ({dist_pct:+.1f}%)")
 
                 st.divider()
                 st.markdown("### 📐 변동성 (ATR 20일)")
@@ -388,7 +390,6 @@ with col_output:
                 else:
                     st.warning("ATR 계산 불가")
 
-                # 차트
                 st.divider()
                 st.markdown("### 📈 차트")
                 fig = go.Figure()
@@ -410,7 +411,6 @@ with col_output:
                     line=dict(color="blue", dash="dot")
                 ))
 
-                # 현재가 수평선 추가
                 fig.add_trace(go.Scatter(
                     x=[chart_df.index[0], chart_df.index[-1]],
                     y=[current_price, current_price],
@@ -420,7 +420,7 @@ with col_output:
 
                 fig.update_layout(
                     height=600,
-                    title=f"{name+' ' if name else ''}{code} - VCP 다중 타점 (현재가: {current_price:,.0f}원)",
+                    title=f"{name+' ' if name else ''}{code} (현재가: {current_price:,.0f}원)",
                     xaxis_rangeslider_visible=False,
                     hovermode="x unified"
                 )
@@ -428,5 +428,6 @@ with col_output:
                 st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
-st.caption("※ ATR은 변동성 참고/버퍼용이며, 매매 기준은 구조가 우선입니다.")
+st.caption("✅ 모든 손절가는 구조 기반(스윙/타이트 구간 저점 - ATR 버퍼)으로 계산됩니다.")
+
 
