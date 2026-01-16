@@ -74,11 +74,7 @@ def get_stock_data(code, days=200):
 # 3. VCP 파동 구조 인식 함수
 # -----------------------------------------------------------
 def clean_zigzag_swings(swings):
-    """
-    연속된 같은 타입의 스윙 정리
-    - 고점이 연속되면 가장 높은 것만
-    - 저점이 연속되면 가장 낮은 것만
-    """
+    """연속된 같은 타입의 스윙 정리"""
     if len(swings) < 2:
         return swings
     
@@ -101,19 +97,7 @@ def clean_zigzag_swings(swings):
     return cleaned
 
 def detect_swings_hl(high, low, close, atr, lookback=60):
-    """
-    High/Low 기준 스윙 고점·저점 추출 (ATR 기반 필터링)
-    
-    Args:
-        high: High 시리즈
-        low: Low 시리즈
-        close: Close 시리즈
-        atr: Average True Range
-        lookback: 분석 기간
-    
-    Returns:
-        list of dict: [{'type': 'high'|'low', 'price': float, 'date': Timestamp, 'idx': int}, ...]
-    """
+    """High/Low 기준 스윙 고점·저점 추출"""
     if len(high) < lookback:
         return []
     
@@ -177,24 +161,7 @@ def detect_swings_hl(high, low, close, atr, lookback=60):
     return filtered_swings
 
 def validate_vcp_structure(swings, atr):
-    """
-    VCP 구조 검증: 깊이 수축 + 고점 압력 감소 + 저점 지지 상승
-    
-    Args:
-        swings: detect_swings_hl() 결과
-        atr: Average True Range
-    
-    Returns:
-        dict: {
-            'is_vcp': bool,
-            'wave_bonus': float,
-            'depth_contraction': bool,
-            'duration_contraction': bool,
-            'highs_tightening': bool,
-            'lows_rising': bool,
-            'waves': list
-        }
-    """
+    """VCP 구조 검증"""
     if len(swings) < 6:
         return {
             'is_vcp': False,
@@ -270,7 +237,7 @@ def validate_vcp_structure(swings, atr):
     elif depth_contraction and highs_tightening:
         wave_bonus = 0.85
     else:
-        wave_bonus = .8
+        wave_bonus = 1.8
     
     return {
         'is_vcp': is_vcp,
@@ -286,7 +253,7 @@ def validate_vcp_structure(swings, atr):
 # 4. VCP Scanner v4 Final
 # -----------------------------------------------------------
 def vcp_tightness_scanner(df, short_period=10, long_period=60, atr_period=20):
-    """VCP Scanner v4 Final - High/Low 기반 구조 인식 스캐너"""
+    """VCP Scanner v4 Final"""
     if df is None or len(df) < long_period + atr_period:
         return None
     
@@ -463,9 +430,8 @@ st.markdown("""
 **High/Low 기반 파동 구조 인식 스캐너**
 
 ✅ **구조 검증**: 깊이 수축 + 고점 압력 감소 + 저점 지지 상승  
-✅ **테이블 클릭**: 상세 분석 테이블에서 종목을 클릭하면 차트가 변경됩니다  
-✅ **ATR 필터링**: 종목별 변동성 반영한 동적 threshold  
-✅ **생존 필터**: 거래정지/죽은 종목 즉시 제거  
+✅ **테이블 클릭**: 전체 랭킹 테이블에서 행을 클릭하면 아래 차트가 변경됩니다  
+✅ **정렬 가능**: 테이블 컬럼 클릭으로 정렬 가능  
 ✅ **점수 체계**: VCP 구조 통과 시 0.60배 / 부분 통과 0.85배 / 실패 1.8배
 """)
 
@@ -492,12 +458,9 @@ with st.sidebar:
     if st.button("🚀 스캔", type="primary", use_container_width=True):
         st.session_state['run'] = True
         st.session_state['results'] = []
-        st.session_state['selected_idx'] = 0
 
 if 'results' not in st.session_state:
     st.session_state['results'] = []
-if 'selected_idx' not in st.session_state:
-    st.session_state['selected_idx'] = 0
 
 # -----------------------------------------------------------
 # 7. 스캔 실행
@@ -547,7 +510,6 @@ if st.session_state.get('run'):
         else:
             ranking = pd.DataFrame(results).sort_values('score').head(top_n)
             st.session_state['results'] = ranking.to_dict('records')
-            st.session_state['selected_idx'] = 0
             st.session_state['run'] = False
             
             vcp_count = sum([1 for r in ranking.to_dict('records') if r.get('is_vcp')])
@@ -555,7 +517,7 @@ if st.session_state.get('run'):
             st.success(f"✅ {len(ranking)}개 발견! (완전 VCP: {vcp_count}개 / 부분 통과: {partial_count}개)")
 
 # -----------------------------------------------------------
-# 8. 결과 (테이블 클릭 방식)
+# 8. 결과 (원래 테이블 + 클릭 기능)
 # -----------------------------------------------------------
 results = st.session_state['results']
 
@@ -568,7 +530,6 @@ if not results:
         
         **1. High/Low 기반 파동 추출**
         - Close 기준 ❌ → High/Low 기준 ✅
-        - 장중 위꼬리/아래꼬리 = 공급/수요 흔적 포착
         
         **2. 3중 구조 검증**
         - ✅ 깊이 수축 (depth ↓)
@@ -576,8 +537,8 @@ if not results:
         - ✅ 저점 지지 상승 (lows ↑ 계단식)
         
         **3. 테이블 클릭 UX**
-        - 상세 분석 테이블에서 종목 클릭
-        - 즉시 차트 변경
+        - 전체 랭킹 테이블에서 행 클릭 → 차트 변경
+        - 정렬 가능
         
         **예상 정확도: 92점**
         """)
@@ -585,39 +546,38 @@ else:
     vcp_count = sum([1 for r in results if r.get('is_vcp')])
     partial_count = sum([1 for r in results if not r.get('is_vcp') and r.get('wave_bonus') < 1.5])
     
-    st.success(f"🎯 상위 {len(results)}개 | 완전 VCP: {vcp_count}개 | 부분 통과: {partial_count}개")
+    st.success(f"🎯 상위 {len(results)}개 | 완전 VCP: {vcp_count}개 | 부분 통과: {partial_count}개)")
+    
+    st.markdown("### 📋 전체 랭킹 (행을 클릭하면 아래 차트가 변경됩니다)")
+    
+    # DataFrame 생성
+    summary_df = pd.DataFrame([{
+        '순위': idx + 1,
+        '종목': r['Name'],
+        'VCP': '✅' if r.get('is_vcp') else '⚠️' if r.get('wave_bonus') < 1.5 else '❌',
+        '시총(억)': f"{r['Marcap']:,.0f}",
+        '현재가': f"{r['current_price']:,.0f}",
+        '점수': f"{r['score']:.3f}",
+        '깊이': '✅' if r.get('depth_contraction') else '❌',
+        '고점': '✅' if r.get('highs_tightening') else '❌',
+        '저점': '✅' if r.get('lows_rising') else '❌',
+        '파동': r.get('wave_count', 0)
+    } for idx, r in enumerate(results)])
+    
+    # on_select 이벤트를 사용한 테이블 (Streamlit 1.35.0+)
+    event = st.dataframe(
+        summary_df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row"
+    )
     
     st.divider()
     
-    # 2단 레이아웃: 왼쪽 테이블, 오른쪽 차트
-    col_left, col_right = st.columns([1, 2])
-    
-    with col_left:
-        st.subheader("📋 상세 분석")
-        
-        # 클릭 가능한 테이블 생성
-        for idx, r in enumerate(results):
-            vcp_icon = '✅' if r.get('is_vcp') else '⚠️' if r.get('wave_bonus') < 1.5 else '❌'
-            
-            # 선택된 종목 강조
-            if idx == st.session_state['selected_idx']:
-                button_type = "primary"
-            else:
-                button_type = "secondary"
-            
-            # 버튼으로 클릭 가능하게
-            if st.button(
-                f"{idx+1}. {vcp_icon} {r['Name']} ({r['score']:.3f})",
-                key=f"stock_{idx}",
-                type=button_type,
-                use_container_width=True
-            ):
-                st.session_state['selected_idx'] = idx
-                st.rerun()
-    
-    with col_right:
-        # 선택된 종목 차트 표시
-        selected_idx = st.session_state['selected_idx']
+    # 선택된 행 처리
+    if event.selection.rows:
+        selected_idx = event.selection.rows[0]
         target = results[selected_idx]
         
         st.subheader(f"📊 {target['Name']} 상세 분석")
@@ -662,5 +622,7 @@ else:
             }])
             
             st.dataframe(detail_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("👆 위 테이블에서 종목을 클릭하면 차트가 표시됩니다")
 
 
