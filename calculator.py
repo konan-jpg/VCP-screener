@@ -13,14 +13,9 @@ st.title("🎯 VCP 다중 타점 계산기 (미너비니식 타이트 스탑)")
 
 st.markdown("""
 **VCP 완성 종목 전용 · 4가지 타점 자동 분석**
-
-- 정석 VCP / Cheat / Low Cheat / Pullback
-- 타점별 Entry · Stop · R 자동 계산
-- **타이트 구간 기반 손절 (최대 -10% 제한)**
-- 신뢰도 점수
+- 정석 VCP / Cheat / Low Cheat / Pullback | 타점별 Entry · Stop · R 자동 계산
+- 타이트 구간 기반 손절 (최대 -10% 제한) | 신뢰도 점수
 """)
-
-st.caption("※ 손절가는 '마지막 타이트 구간 저점 - ATR 버퍼'로 계산 (리스크 -10% 초과 시 자동 조정)")
 
 # -------------------------------------------------
 # 종목명/코드 매핑
@@ -113,11 +108,7 @@ def prepare_indicators(df):
 # 타이트 구간 저점 탐지
 # -------------------------------------------------
 def find_tight_zone_low(df, lookback=20, max_days=10):
-    """
-    마지막 타이트 구간의 저점 찾기
-    - 일일 변동폭(High-Low) < ATR × 0.6
-    - 최근 max_days일 이내
-    """
+    """마지막 타이트 구간의 저점 찾기"""
     recent = df.tail(lookback)
     atr = recent['ATR20'].iloc[-1]
     
@@ -135,16 +126,12 @@ def find_tight_zone_low(df, lookback=20, max_days=10):
     last_tight = tight_data.tail(max_days)
     return float(last_tight['Low'].min())
 
-# -------------------------------------------------
-# 거래량 Dry-up 점수
-# -------------------------------------------------
 def volume_dry_score(df):
     """거래량 고갈 정도 (0.6 ~ 1.0)"""
     recent_min = df["Volume"].tail(3).min()
     avg60 = df["VolAvg60"].iloc[-1]
     if pd.isna(avg60) or avg60 == 0:
         return 0.6
-
     ratio = recent_min / avg60
     if ratio < 0.4:
         return 1.0
@@ -152,9 +139,6 @@ def volume_dry_score(df):
         return 0.8
     return 0.6
 
-# -------------------------------------------------
-# 거리 가중치
-# -------------------------------------------------
 def distance_weight(entry, current):
     """현재가 vs 진입가 거리 가중"""
     if entry == 0:
@@ -170,9 +154,6 @@ def distance_weight(entry, current):
         return 0.85
     return 0.7
 
-# -------------------------------------------------
-# Low Cheat 트리거 탐지
-# -------------------------------------------------
 def find_low_cheat_trigger(df, lookback=60):
     """Low Cheat 트리거: 강한 양봉 + 거래량"""
     x = df.tail(lookback).copy()
@@ -184,23 +165,17 @@ def find_low_cheat_trigger(df, lookback=60):
     body = (x["Close"] - x["Open"]).abs()
     bullish = x["Close"] > x["Open"]
 
-    cond = bullish
-    cond &= atr.notna() & (atr > 0)
-    cond &= vol_avg.notna() & (vol_avg > 0)
-    cond &= (body >= 0.6 * atr)
-    cond &= (x["Volume"] >= 1.0 * vol_avg)
+    cond = bullish & (atr > 0) & atr.notna() & (vol_avg > 0) & vol_avg.notna()
+    cond &= (body >= 0.6 * atr) & (x["Volume"] >= 1.0 * vol_avg)
 
     hits = x[cond]
-    if len(hits) == 0:
-        return None
-
-    return df.loc[hits.index[-1]]
+    return df.loc[hits.index[-1]] if len(hits) > 0 else None
 
 # -------------------------------------------------
-# 타점 계산 (타이트 구간 기반)
+# 타점 계산
 # -------------------------------------------------
 def calculate_entries(df, atr_buffer_mult=0.3):
-    """4가지 진입타점 계산 (타이트 구간 기반 + 리스크 -10% 제한)"""
+    """4가지 진입타점 계산"""
     recent = df.tail(120)
     atr20 = recent["ATR20"].iloc[-1]
     
@@ -214,29 +189,20 @@ def calculate_entries(df, atr_buffer_mult=0.3):
     base_range = base_high - base_low
     upper_third = base_low + base_range * 0.66
     
-    current_price = float(recent["Close"].iloc[-1])
-    
-    # ========================================
     # 1) 정석 VCP
-    # ========================================
     vcp_entry = base_high
     vcp_structure_low = find_tight_zone_low(df, lookback=20, max_days=10)
     vcp_stop = max(100.0, vcp_structure_low - buffer)
-    
     vcp_risk = (vcp_entry - vcp_stop) / vcp_entry
     if vcp_risk > 0.10:
         vcp_stop = vcp_entry * 0.92
     
-    # ========================================
     # 2) Cheat Entry
-    # ========================================
     cheat_zone = recent[recent["High"] >= upper_third]
-    
     if len(cheat_zone) > 0:
         cheat_entry = float(cheat_zone["High"].tail(20).max())
         cheat_tight_low = float(cheat_zone['Low'].tail(10).min())
         cheat_stop = max(100.0, cheat_tight_low - buffer)
-        
         cheat_risk = (cheat_entry - cheat_stop) / cheat_entry
         if cheat_risk > 0.10:
             cheat_stop = cheat_entry * 0.92
@@ -244,11 +210,8 @@ def calculate_entries(df, atr_buffer_mult=0.3):
         cheat_entry = base_high * 0.98
         cheat_stop = vcp_stop
     
-    # ========================================
     # 3) Low Cheat
-    # ========================================
     trigger = find_low_cheat_trigger(df, lookback=60)
-    
     if trigger is not None and not pd.isna(trigger["ATR20"]):
         low_entry = float(trigger["High"])
         low_stop = max(100.0, float(trigger["Low"] - atr_buffer_mult * trigger["ATR20"]))
@@ -261,13 +224,10 @@ def calculate_entries(df, atr_buffer_mult=0.3):
     if low_risk > 0.10:
         low_stop = low_entry * 0.92
     
-    # ========================================
     # 4) Pullback
-    # ========================================
     pull_entry = base_high
     pull_tight_low = find_tight_zone_low(df, lookback=15, max_days=7)
     pull_stop = max(100.0, pull_tight_low - buffer)
-    
     pull_risk = (pull_entry - pull_stop) / pull_entry
     if pull_risk > 0.10:
         pull_stop = pull_entry * 0.92
@@ -279,9 +239,6 @@ def calculate_entries(df, atr_buffer_mult=0.3):
         "Pullback": (pull_entry, pull_stop),
     }
 
-# -------------------------------------------------
-# 신뢰 점수
-# -------------------------------------------------
 def confidence_score(entry, stop, df, entry_type):
     """타점 신뢰도 (0~100)"""
     current = df["Close"].iloc[-1]
@@ -313,118 +270,121 @@ def confidence_score(entry, stop, df, entry_type):
     return min(int(score), 100)
 
 # -------------------------------------------------
-# UI
+# UI - 상단 입력 영역 (가로 배치)
 # -------------------------------------------------
 listing = load_krx_listing()
 
-col_input, col_output = st.columns([1, 2])
+st.markdown("### 📥 입력")
+col1, col2, col3 = st.columns([3, 2, 3])
 
-with col_input:
-    st.subheader("📥 입력")
-
+with col1:
     user_input = st.text_input(
         "종목 코드 또는 종목명",
         placeholder="예: 005930 또는 삼성전자",
         help="코드(6자리) 또는 종목명(부분일치) 입력"
     )
 
+with col2:
     atr_buffer_mult = st.slider("ATR 버퍼 배수", 0.1, 1.0, 0.3, 0.1)
-    st.caption("손절 = 타이트 구간 저점 - (ATR × 버퍼)")
 
-    st.divider()
-
+with col3:
     with st.expander("💡 타점 설명"):
         st.markdown("""
-**정석 VCP**
-- Entry: 베이스 최고가
-- Stop: 마지막 타이트 구간 저점 - ATR버퍼
-
-**Cheat**
-- Entry: 베이스 상단 1/3 고점
-- Stop: 상단 1/3 타이트 구간 저점 - ATR버퍼
-
-**Low Cheat**
-- Entry: 트리거 바 고가
-- Stop: 트리거 바 저점 - ATR버퍼
-
-**Pullback**
-- Entry: 베이스 최고가
-- Stop: 풀백 타이트 구간 저점 - ATR버퍼
-
-※ 모든 타점: 리스크 -10% 초과 시 자동으로 -8%로 제한
+**정석 VCP**: 베이스 최고가 진입 | 타이트 구간 저점 스탑  
+**Cheat**: 상단 1/3 고점 진입 | 상단 1/3 타이트 저점 스탑  
+**Low Cheat**: 트리거 바 고가 진입 | 트리거 바 저점 스탑  
+**Pullback**: 베이스 최고가 재진입 | 풀백 타이트 저점 스탑  
+※ 리스크 -10% 초과 시 자동 -8% 조정
 """)
 
-with col_output:
-    if not user_input:
-        st.info("👈 종목 코드(6자리) 또는 종목명을 입력하세요")
+st.divider()
+
+# -------------------------------------------------
+# 하단 결과 영역 (전체 폭)
+# -------------------------------------------------
+if not user_input:
+    st.info("👆 종목 코드(6자리) 또는 종목명을 입력하세요")
+else:
+    code, name = resolve_code(user_input, listing)
+
+    if not code:
+        st.error("❌ 종목을 찾지 못했습니다.")
     else:
-        code, name = resolve_code(user_input, listing)
-
-        if not code:
-            st.error("❌ 종목을 찾지 못했습니다.")
+        if name:
+            st.subheader(f"📌 {name} ({code})")
         else:
-            if name:
-                st.subheader(f"📌 {name} ({code})")
-            else:
-                st.subheader(f"📌 {code}")
+            st.subheader(f"📌 {code}")
 
-            df = load_data(code)
-            if df is None:
-                st.error("❌ 데이터 로딩 실패")
-            else:
-                df = prepare_indicators(df)
-                current_price = float(df["Close"].iloc[-1])
+        df = load_data(code)
+        if df is None:
+            st.error("❌ 데이터 로딩 실패")
+        else:
+            df = prepare_indicators(df)
+            current_price = float(df["Close"].iloc[-1])
+            
+            # 현재가 표시
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("🔹 현재가", f"{current_price:,.0f}원", 
+                     delta=f"{((current_price - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100):.2f}%")
+            
+            atr20 = df["ATR20"].iloc[-1]
+            if not pd.isna(atr20):
+                atr_pct = atr20 / current_price * 100
+                m2.metric("ATR(20)", f"{atr20:,.0f}원")
+                m3.metric("ATR / 현재가", f"{atr_pct:.2f}%")
+            
+            entries = calculate_entries(df, atr_buffer_mult=atr_buffer_mult)
+
+            rows = []
+            for entry_name, (entry, stop) in entries.items():
+                score = confidence_score(entry, stop, df, entry_name)
+                r_value = entry - stop
+                dist_from_current = ((entry - current_price) / current_price) * 100
                 
-                st.metric("🔹 현재가", f"{current_price:,.0f}원", 
-                         delta=f"{((current_price - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100):.2f}%")
-                
-                entries = calculate_entries(df, atr_buffer_mult=atr_buffer_mult)
+                rows.append({
+                    "타점": entry_name,
+                    "진입가": float(entry),
+                    "손절가": float(stop),
+                    "R(원)": float(r_value),
+                    "손절폭(%)": float((stop - entry) / entry * 100),
+                    "현재가 대비(%)": float(dist_from_current),
+                    "신뢰도": int(score),
+                    "_score": int(score),
+                })
 
-                rows = []
-                for entry_name, (entry, stop) in entries.items():
-                    score = confidence_score(entry, stop, df, entry_name)
-                    r_value = entry - stop
-                    dist_from_current = ((entry - current_price) / current_price) * 100
-                    
-                    rows.append({
-                        "타점": entry_name,
-                        "진입가": float(entry),
-                        "손절가": float(stop),
-                        "R(원)": float(r_value),
-                        "손절폭(%)": float((stop - entry) / entry * 100),
-                        "현재가 대비(%)": float(dist_from_current),
-                        "신뢰도": int(score),
-                        "_score": int(score),
-                    })
+            df_result = pd.DataFrame(rows).sort_values("_score", ascending=False).reset_index(drop=True)
+            df_result.insert(0, "순위", range(1, len(df_result) + 1))
 
-                df_result = pd.DataFrame(rows).sort_values("_score", ascending=False).reset_index(drop=True)
-                df_result.insert(0, "순위", range(1, len(df_result) + 1))
+            # 1순위 진입가 추출
+            best_entry = df_result.iloc[0]["진입가"]
+            best_name = df_result.iloc[0]["타점"]
 
-                st.subheader("📊 타점 비교 (신뢰도 순)")
-                display = df_result.copy()
-                display["진입가"] = display["진입가"].map(lambda x: f"{x:,.0f}")
-                display["손절가"] = display["손절가"].map(lambda x: f"{x:,.0f}")
-                display["R(원)"] = display["R(원)"].map(lambda x: f"{x:,.0f}")
-                display["손절폭(%)"] = display["손절폭(%)"].map(lambda x: f"{x:.1f}%")
-                display["현재가 대비(%)"] = display["현재가 대비(%)"].map(lambda x: f"{x:+.1f}%")
+            st.markdown("### 📊 타점 비교 (신뢰도 순)")
+            display = df_result.copy()
+            display["진입가"] = display["진입가"].map(lambda x: f"{x:,.0f}")
+            display["손절가"] = display["손절가"].map(lambda x: f"{x:,.0f}")
+            display["R(원)"] = display["R(원)"].map(lambda x: f"{x:,.0f}")
+            display["손절폭(%)"] = display["손절폭(%)"].map(lambda x: f"{x:.1f}%")
+            display["현재가 대비(%)"] = display["현재가 대비(%)"].map(lambda x: f"{x:+.1f}%")
 
-                st.dataframe(
-                    display[["순위","타점","진입가","손절가","R(원)","손절폭(%)","현재가 대비(%)","신뢰도"]],
-                    use_container_width=True,
-                    hide_index=True
-                )
+            st.dataframe(
+                display[["순위","타점","진입가","손절가","R(원)","손절폭(%)","현재가 대비(%)","신뢰도"]],
+                use_container_width=True,
+                hide_index=True
+            )
 
-                best = df_result.iloc[0]
+            best = df_result.iloc[0]
+            dist_pct = best['현재가 대비(%)']
+            
+            col_msg1, col_msg2 = st.columns(2)
+            with col_msg1:
                 st.success(f"""⭐ **자동 추천 타점**: {best['타점']}
-- 신뢰도: {best['_score']}점
-- 진입가: {best['진입가']:,.0f}원
-- 손절가: {best['손절가']:,.0f}원
-- R: {best['R(원)']:,.0f}원
-- 손절폭: {best['손절폭(%)']:.1f}%
-- 현재가 대비: {best['현재가 대비(%)']:+.1f}%
+- 신뢰도: {best['_score']}점 | 진입가: {best['진입가']:,.0f}원
+- 손절가: {best['손절가']:,.0f}원 | R: {best['R(원)']:,.0f}원
+- 손절폭: {best['손절폭(%)']:.1f}% | 현재가 대비: {best['현재가 대비(%)']:+.1f}%
 """)
-
-                dist_pct = best['현재가 대비(%)']
+            
+            with col_msg2:
                 if dist_pct < -3:
                     st.warning(f"⚠️ 이미 돌파됨 (현재가: {current_price:,.0f}원)")
                 elif dist_pct > 10:
@@ -432,56 +392,55 @@ with col_output:
                 else:
                     st.success(f"✅ 진입 대기 구간 ({dist_pct:+.1f}%)")
 
-                st.divider()
-                st.markdown("### 📐 변동성 (ATR 20일)")
-                atr20 = df["ATR20"].iloc[-1]
-                if not pd.isna(atr20):
-                    atr_pct = atr20 / current_price * 100
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("현재가", f"{current_price:,.0f}원")
-                    col2.metric("ATR(20)", f"{atr20:,.0f}원")
-                    col3.metric("ATR / 현재가", f"{atr_pct:.2f}%")
-                else:
-                    st.warning("ATR 계산 불가")
+            st.divider()
+            st.markdown("### 📈 차트 (1순위 진입가 표시)")
+            
+            fig = go.Figure()
+            chart_df = df.tail(120)
 
-                st.divider()
-                st.markdown("### 📈 차트")
-                fig = go.Figure()
-                chart_df = df.tail(120)
+            fig.add_trace(go.Candlestick(
+                x=chart_df.index,
+                open=chart_df["Open"],
+                high=chart_df["High"],
+                low=chart_df["Low"],
+                close=chart_df["Close"],
+                name="Price"
+            ))
 
-                fig.add_trace(go.Candlestick(
-                    x=chart_df.index,
-                    open=chart_df["Open"],
-                    high=chart_df["High"],
-                    low=chart_df["Low"],
-                    close=chart_df["Close"],
-                    name="Price"
-                ))
+            fig.add_trace(go.Scatter(
+                x=chart_df.index,
+                y=chart_df["MA50"],
+                name="50MA",
+                line=dict(color="blue", dash="dot", width=1)
+            ))
 
-                fig.add_trace(go.Scatter(
-                    x=chart_df.index,
-                    y=chart_df["MA50"],
-                    name="50MA",
-                    line=dict(color="blue", dash="dot")
-                ))
+            # 현재가 라인
+            fig.add_trace(go.Scatter(
+                x=[chart_df.index[0], chart_df.index[-1]],
+                y=[current_price, current_price],
+                name=f"현재가 ({current_price:,.0f})",
+                line=dict(color="orange", dash="solid", width=2)
+            ))
 
-                fig.add_trace(go.Scatter(
-                    x=[chart_df.index[0], chart_df.index[-1]],
-                    y=[current_price, current_price],
-                    name=f"현재가 ({current_price:,.0f})",
-                    line=dict(color="orange", dash="solid", width=2)
-                ))
+            # 1순위 진입가 라인 (초록색)
+            fig.add_trace(go.Scatter(
+                x=[chart_df.index[0], chart_df.index[-1]],
+                y=[best_entry, best_entry],
+                name=f"1순위 진입가 - {best_name} ({best_entry:,.0f})",
+                line=dict(color="green", dash="dash", width=2)
+            ))
 
-                fig.update_layout(
-                    height=600,
-                    title=f"{name+' ' if name else ''}{code} (현재가: {current_price:,.0f}원)",
-                    xaxis_rangeslider_visible=False,
-                    hovermode="x unified"
-                )
+            fig.update_layout(
+                height=600,
+                title=f"{name+' ' if name else ''}{code} | 현재가: {current_price:,.0f}원 | 1순위: {best_name} {best_entry:,.0f}원",
+                xaxis_rangeslider_visible=False,
+                hovermode="x unified"
+            )
 
-                st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 st.caption("✅ 손절가는 타이트 구간 저점 기반 (리스크 -10% 초과 시 자동 -8%로 조정)")
+
 
 
