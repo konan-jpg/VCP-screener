@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
+from difflib import get_close_matches
 
 # -----------------------------
 # 페이지
@@ -15,6 +16,88 @@ st.markdown("""
 - 종목 입력 → 상황(셋업) 선택 → **내 진입가** 입력 → 체크리스트/신뢰도/손절 후보를 즉시 계산
 - 손절폭이 **-8% 초과면 FAIL(진입불가)** 처리 (오닐식 리스크 관리)  
 """)
+
+# -----------------------------
+# 종목 리스트 로딩 (캐시)
+# -----------------------------
+@st.cache_data(ttl=86400, show_spinner="종목 리스트 로딩 중...")
+def load_stock_listing():
+    """KRX 전체 종목 리스트 로딩"""
+    try:
+        kospi = fdr.StockListing('KOSPI')
+        kosdaq = fdr.StockListing('KOSDAQ')
+        stocks = pd.concat([kospi, kosdaq], ignore_index=True)
+        
+        # 컬럼명 통일
+        if 'Symbol' in stocks.columns:
+            stocks = stocks.rename(columns={'Symbol': 'Code'})
+        elif 'code' in stocks.columns:
+            stocks = stocks.rename(columns={'code': 'Code'})
+        
+        stocks['Code'] = stocks['Code'].astype(str).str.zfill(6)
+        
+        # Code, Name만 추출
+        result = stocks[['Code', 'Name']].dropna().drop_duplicates()
+        return result
+    except Exception:
+        return pd.DataFrame(columns=['Code', 'Name'])
+
+# -----------------------------
+# 종목명/코드 변환 (유사도 기반 자동완성)
+# -----------------------------
+def resolve_stock_input(user_input, stock_list):
+    """
+    사용자 입력(종목코드 또는 종목명)을 종목코드로 변환
+    - 6자리 숫자: 종목코드로 직접 사용
+    - 문자열: 종목명으로 검색 (유사도 매칭 포함)
+    
+    Returns:
+        (code, name, match_type) 튜플
+        match_type: 'exact_code', 'exact_name', 'fuzzy_name', None
+    """
+    if stock_list.empty:
+        return None, None, None
+    
+    user_input = user_input.strip()
+    
+    # 1. 종목코드(6자리 숫자) 직접 입력
+    if user_input.isdigit():
+        code = user_input.zfill(6)
+        match = stock_list[stock_list['Code'] == code]
+        if len(match) > 0:
+            return code, match.iloc[0]['Name'], 'exact_code'
+        else:
+            return None, None, None
+    
+    # 2. 종목명 정확히 일치
+    exact_match = stock_list[stock_list['Name'] == user_input]
+    if len(exact_match) == 1:
+        return exact_match.iloc[0]['Code'], exact_match.iloc[0]['Name'], 'exact_name'
+    elif len(exact_match) > 1:
+        # 동일 종목명 여러 개 (드문 경우)
+        return exact_match.iloc[0]['Code'], exact_match.iloc[0]['Name'], 'exact_name'
+    
+    # 3. 부분 일치 (포함 관계)
+    partial_match = stock_list[stock_list['Name'].str.contains(user_input, case=False, na=False)]
+    if len(partial_match) == 1:
+        return partial_match.iloc[0]['Code'], partial_match.iloc[0]['Name'], 'exact_name'
+    elif len(partial_match) > 1:
+        # 여러 개 일치: 가장 짧은 이름 우선 (예: "삼성" 입력 시 "삼성전자" > "삼성전자우")
+        partial_match = partial_match.copy()
+        partial_match['name_len'] = partial_match['Name'].str.len()
+        partial_match = partial_match.sort_values('name_len')
+        return partial_match.iloc[0]['Code'], partial_match.iloc[0]['Name'], 'exact_name'
+    
+    # 4. 유사도 매칭 (오타 보정)
+    all_names = stock_list['Name'].tolist()
+    close_matches = get_close_matches(user_input, all_names, n=3, cutoff=0.6)
+    
+    if close_matches:
+        best_match = close_matches[0]
+        match_row = stock_list[stock_list['Name'] == best_match].iloc[0]
+        return match_row['Code'], match_row['Name'], 'fuzzy_name'
+    
+    return None, None, None
 
 # -----------------------------
 # 데이터 로딩 (캐시 함수: 순수 함수로 유지)
@@ -229,13 +312,23 @@ SETUPS = {
 }
 
 # -----------------------------
+# 종목 리스트 로딩
+# -----------------------------
+stock_listing = load_stock_listing()
+
+# -----------------------------
 # UI 입력
 # -----------------------------
 st.markdown("### 📥 입력")
 colA, colB, colC = st.columns([2.0, 2.0, 2.0])
 
 with colA:
-    code = st.text_input("종목코드(예: 005930)", value="", placeholder="005930")
+    user_stock_input = st.text_input(
+        "종목코드 또는 종목명", 
+        value="", 
+        placeholder="예: 005930 또는 삼성전자",
+        help="종목코드(6자리) 또는 종목명 입력 (오타 자동 보정)"
+    )
 
 with colB:
     setup_name = st.selectbox("상황(셋업) 선택", list(SETUPS.keys()))
@@ -246,20 +339,36 @@ with colC:
 st.divider()
 
 # -----------------------------
-# 입력 검증
+# 종목 입력 검증 및 변환
 # -----------------------------
-if not code.strip():
-    st.info("👆 종목코드를 입력하세요.")
+if not user_stock_input.strip():
+    st.info("👆 종목코드(예: 005930) 또는 종목명(예: 삼성전자)을 입력하세요.")
     st.stop()
+
+# 종목 변환
+code, stock_name, match_type = resolve_stock_input(user_stock_input, stock_listing)
+
+if code is None:
+    st.error(f"❌ 종목을 찾을 수 없습니다: '{user_stock_input}'")
+    st.warning("💡 힌트: 종목코드 6자리(예: 005930) 또는 정확한 종목명(예: 삼성전자)을 입력하세요.")
+    st.stop()
+
+# 매칭 결과 표시
+if match_type == 'exact_code':
+    st.success(f"✅ 종목 확인: **{stock_name}** ({code})")
+elif match_type == 'exact_name':
+    st.success(f"✅ 종목 확인: **{stock_name}** ({code})")
+elif match_type == 'fuzzy_name':
+    st.warning(f"🔍 '{user_stock_input}' → **{stock_name}** ({code})로 자동 보정되었습니다.")
 
 # -----------------------------
 # 데이터 로딩 (캐시 함수 외부에서 UI 처리)
 # -----------------------------
-df = load_data(code.strip())
+df = load_data(code)
 
 if df is None:
-    st.error("❌ 데이터 로딩 실패: 종목코드가 잘못되었거나 데이터가 부족합니다(최소 120일 필요).")
-    st.warning("💡 힌트: 종목코드 6자리를 정확히 입력했는지 확인하세요(예: 005930).")
+    st.error(f"❌ 데이터 로딩 실패: {stock_name}({code})의 데이터가 부족하거나 없습니다(최소 120일 필요).")
+    st.warning("💡 힌트: 상장폐지 종목이거나 데이터가 충분하지 않을 수 있습니다.")
     st.stop()
 
 # 데이터 소스 투명성 표시
@@ -307,7 +416,7 @@ valid_cands = cand_df[cand_df["유효(<=8%)"] == True].copy()
 # 결과 표시
 # -----------------------------
 st.markdown("---")
-st.subheader(f"📌 {code} | 종가(최근 일봉) 기준 평가")
+st.subheader(f"📌 {stock_name} ({code}) | 종가(최근 일봉) 기준 평가")
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("현재가(종가)", f"{current_price:,.0f}원")
 m2.metric("내 진입가", f"{entry_price:,.0f}원")
@@ -419,7 +528,7 @@ fig.add_trace(go.Scatter(
 
 fig.update_layout(
     height=600,
-    title=f"{code} | {setup_name} | Entry: {entry_price:,.0f}원 | Stop: {chosen_stop:,.0f}원 | 신뢰도: {final_score}점",
+    title=f"{stock_name}({code}) | {setup_name} | Entry: {entry_price:,.0f}원 | Stop: {chosen_stop:,.0f}원 | 신뢰도: {final_score}점",
     xaxis_rangeslider_visible=False,
     hovermode="x unified"
 )
@@ -438,3 +547,4 @@ st.warning("""
 """)
 
 st.caption(f"💾 마지막 데이터 업데이트: {df.index[-1].strftime('%Y-%m-%d')} | 평가 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
