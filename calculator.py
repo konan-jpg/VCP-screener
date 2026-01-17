@@ -270,7 +270,7 @@ def confidence_score(entry, stop, df, entry_type):
     return min(int(score), 100)
 
 # -------------------------------------------------
-# UI - 상단 입력 영역 (가로 배치)
+# UI - 상단 입력 영역
 # -------------------------------------------------
 listing = load_krx_listing()
 
@@ -299,8 +299,12 @@ with col3:
 
 st.divider()
 
+# Session state 초기화
+if 'selected_entry_idx' not in st.session_state:
+    st.session_state.selected_entry_idx = 0
+
 # -------------------------------------------------
-# 하단 결과 영역 (전체 폭)
+# 하단 결과 영역
 # -------------------------------------------------
 if not user_input:
     st.info("👆 종목 코드(6자리) 또는 종목명을 입력하세요")
@@ -355,11 +359,9 @@ else:
             df_result = pd.DataFrame(rows).sort_values("_score", ascending=False).reset_index(drop=True)
             df_result.insert(0, "순위", range(1, len(df_result) + 1))
 
-            # 1순위 진입가 추출
-            best_entry = df_result.iloc[0]["진입가"]
-            best_name = df_result.iloc[0]["타점"]
-
-            st.markdown("### 📊 타점 비교 (신뢰도 순)")
+            st.markdown("### 📊 타점 비교 (신뢰도 순) - 클릭하여 차트에 표시")
+            
+            # 테이블 표시 (클릭 이벤트)
             display = df_result.copy()
             display["진입가"] = display["진입가"].map(lambda x: f"{x:,.0f}")
             display["손절가"] = display["손절가"].map(lambda x: f"{x:,.0f}")
@@ -367,21 +369,34 @@ else:
             display["손절폭(%)"] = display["손절폭(%)"].map(lambda x: f"{x:.1f}%")
             display["현재가 대비(%)"] = display["현재가 대비(%)"].map(lambda x: f"{x:+.1f}%")
 
-            st.dataframe(
+            event = st.dataframe(
                 display[["순위","타점","진입가","손절가","R(원)","손절폭(%)","현재가 대비(%)","신뢰도"]],
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row"
             )
 
-            best = df_result.iloc[0]
-            dist_pct = best['현재가 대비(%)']
+            # 선택된 행 처리
+            if event.selection.rows:
+                st.session_state.selected_entry_idx = event.selection.rows[0]
+            
+            selected_idx = st.session_state.selected_entry_idx
+            selected_idx = max(0, min(selected_idx, len(df_result) - 1))
+            
+            selected_row = df_result.iloc[selected_idx]
+            selected_entry = selected_row["진입가"]
+            selected_stop = selected_row["손절가"]
+            selected_name = selected_row["타점"]
+            
+            dist_pct = selected_row['현재가 대비(%)']
             
             col_msg1, col_msg2 = st.columns(2)
             with col_msg1:
-                st.success(f"""⭐ **자동 추천 타점**: {best['타점']}
-- 신뢰도: {best['_score']}점 | 진입가: {best['진입가']:,.0f}원
-- 손절가: {best['손절가']:,.0f}원 | R: {best['R(원)']:,.0f}원
-- 손절폭: {best['손절폭(%)']:.1f}% | 현재가 대비: {best['현재가 대비(%)']:+.1f}%
+                st.info(f"""🎯 **선택된 타점**: {selected_name} (순위: {selected_row['순위']})
+- 신뢰도: {selected_row['_score']}점 | 진입가: {selected_entry:,.0f}원
+- 손절가: {selected_stop:,.0f}원 | R: {selected_row['R(원)']:,.0f}원
+- 손절폭: {selected_row['손절폭(%)']:.1f}% | 현재가 대비: {selected_row['현재가 대비(%)']:+.1f}%
 """)
             
             with col_msg2:
@@ -393,7 +408,7 @@ else:
                     st.success(f"✅ 진입 대기 구간 ({dist_pct:+.1f}%)")
 
             st.divider()
-            st.markdown("### 📈 차트 (1순위 진입가 표시)")
+            st.markdown(f"### 📈 차트 - {selected_name} (진입: 초록 | 손절: 빨강)")
             
             fig = go.Figure()
             chart_df = df.tail(120)
@@ -414,7 +429,7 @@ else:
                 line=dict(color="blue", dash="dot", width=1)
             ))
 
-            # 현재가 라인
+            # 현재가 라인 (주황색)
             fig.add_trace(go.Scatter(
                 x=[chart_df.index[0], chart_df.index[-1]],
                 y=[current_price, current_price],
@@ -422,17 +437,25 @@ else:
                 line=dict(color="orange", dash="solid", width=2)
             ))
 
-            # 1순위 진입가 라인 (초록색)
+            # 선택된 타점의 진입가 라인 (초록색)
             fig.add_trace(go.Scatter(
                 x=[chart_df.index[0], chart_df.index[-1]],
-                y=[best_entry, best_entry],
-                name=f"1순위 진입가 - {best_name} ({best_entry:,.0f})",
-                line=dict(color="green", dash="dash", width=2)
+                y=[selected_entry, selected_entry],
+                name=f"진입가 - {selected_name} ({selected_entry:,.0f})",
+                line=dict(color="green", dash="dash", width=2.5)
+            ))
+
+            # 선택된 타점의 손절가 라인 (빨강색)
+            fig.add_trace(go.Scatter(
+                x=[chart_df.index[0], chart_df.index[-1]],
+                y=[selected_stop, selected_stop],
+                name=f"손절가 ({selected_stop:,.0f})",
+                line=dict(color="red", dash="dash", width=2.5)
             ))
 
             fig.update_layout(
                 height=600,
-                title=f"{name+' ' if name else ''}{code} | 현재가: {current_price:,.0f}원 | 1순위: {best_name} {best_entry:,.0f}원",
+                title=f"{name+' ' if name else ''}{code} | {selected_name} | 현재: {current_price:,.0f} | 진입: {selected_entry:,.0f} | 손절: {selected_stop:,.0f}",
                 xaxis_rangeslider_visible=False,
                 hovermode="x unified"
             )
@@ -440,7 +463,6 @@ else:
             st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
-st.caption("✅ 손절가는 타이트 구간 저점 기반 (리스크 -10% 초과 시 자동 -8%로 조정)")
-
+st.caption("✅ 표에서 타점을 클릭하면 차트에 진입가(초록)/손절가(빨강)가 표시됩니다 | 손절가는 타이트 구간 저점 기반 (-10% 초과 시 자동 -8% 조정)")
 
 
